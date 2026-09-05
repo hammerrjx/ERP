@@ -35,3 +35,8 @@ outputs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# MD
+提示词.md
+Plan.md
+Debug.md
