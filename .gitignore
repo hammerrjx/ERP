@@ -1,0 +1,37 @@
+# Frontend dependencies and build output
+node_modules/
+dist/
+
+# Python runtime and test artifacts
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+.pytest_cache/
+
+# Local application state
+.env
+backend/db.sqlite3
+*.sqlite3
+backend/media/
+backups/
+
+# Python tooling
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local review and generated artifacts
+tmp/
+outputs/
+.codex/
+.memorax-code/
+
+# Local environment variants
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.idea/
+.DS_Store
+Thumbs.db

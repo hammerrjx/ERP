@@ -1,0 +1,11 @@
+import { Building2, ClipboardCheck, ShieldCheck, Users } from 'lucide-react'
+import { config, field, numberColumn, statusColumn } from '../../app/config'
+
+export const organizationConfigs = {
+  departments: config('部门', 'department', Building2, 'department', [['code', '部门代码'], ['name', '部门名称'], ['manager', '负责人'], statusColumn], [field('code', '部门代码', { required: true }), field('name', '部门名称', { required: true }), field('manager', '负责人'), field('parent', '上级部门', { lookup: 'departments' })], { audited: true }),
+  users: config('用户', 'user-account', Users, 'user_account', [['username', '用户名'], ['first_name', '姓名'], ['email', '邮箱'], ['is_active', '启用']], [field('username', '用户名', { required: true }), field('first_name', '姓名'), field('email', '邮箱', { kind: 'email' }), field('password', '初始密码', { kind: 'password', required: true }), field('is_active', '启用', { kind: 'checkbox', defaultValue: true })]),
+  roles: config('角色权限', 'role', ShieldCheck, 'role', [['code', '角色代码'], ['name', '角色名称'], ['department', '部门'], statusColumn], [field('code', '角色代码', { required: true }), field('name', '角色名称', { required: true }), field('department', '部门', { lookup: 'departments', required: true }), field('permissions', '权限代码（逗号分隔）', { kind: 'permissions', required: true })], { audited: true }),
+  userRoles: config('用户角色', 'user-role', Users, 'user_role', [['user', '用户'], ['role', '角色'], ['department', '部门'], ['active', '启用']], [field('user', '用户', { lookup: 'users', required: true }), field('role', '角色', { lookup: 'roles', required: true }), field('department', '部门', { lookup: 'departments', required: true }), field('is_primary', '主角色', { kind: 'checkbox' }), field('active', '启用', { kind: 'checkbox', defaultValue: true })]),
+  approvalRules: config('审批规则', 'approval-rule', ClipboardCheck, 'approval_rule', [['code', '规则代码'], ['document_type', '单据类型'], ['sequence', '顺序'], ['department', '审批部门'], ['role', '审批角色'], statusColumn], [field('code', '规则代码', { required: true }), field('document_type', '单据类型', { required: true }), field('sequence', '审批顺序', { kind: 'number', required: true }), field('department', '审批部门', { lookup: 'departments', required: true }), field('role', '审批角色', { lookup: 'roles', required: true }), field('min_amount', '金额下限', { kind: 'number', defaultValue: 0 }), field('max_amount', '金额上限', { kind: 'number' })], { audited: true }),
+}
+
