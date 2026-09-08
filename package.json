@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/api/*.test.js",
+    "test:browser": "node --test tests/*.test.cjs",
     "build": "vite build",
     "preview": "vite preview"
   },

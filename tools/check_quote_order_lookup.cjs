@@ -1,7 +1,8 @@
 // Render real components with a read-only API snapshot; all API requests are intercepted.
-const { chromium } = require('C:/Users/LENOVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
+const frontendUrl = process.env.ERP_FRONTEND_URL || 'http://127.0.0.1:5175';
 const snapshot = JSON.parse(fs.readFileSync('tmp/quote-order-chain-snapshot.json', 'utf8'));
 
 (async () => {
@@ -26,7 +27,7 @@ const snapshot = JSON.parse(fs.readFileSync('tmp/quote-order-chain-snapshot.json
     })));
     // Register before navigation, because lookups may finish before the form opens.
     const materialLoaded = page.waitForResponse(response => response.url().endsWith('/api/material/'));
-    await page.goto('http://127.0.0.1:5175');
+    await page.goto(frontendUrl);
     await page.getByRole('button', { name: '销售管理', exact: true }).click();
     await page.getByRole('button', { name: '销售报价', exact: true }).click();
     await materialLoaded;

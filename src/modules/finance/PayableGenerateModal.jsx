@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Coins, X } from 'lucide-react'
 import { api, listPayload } from '../../api/client'
 import { today } from '../../shared/presentation'
+import { AsyncForm } from '../../components/PendingControls'
 
 export function PayableGenerateModal({ session, onClose, onSave }) {
   const [sources, setSources] = useState([])
@@ -71,7 +72,7 @@ export function PayableGenerateModal({ session, onClose, onSave }) {
   const submit = (event) => {
     event.preventDefault()
     const chosen = sources.filter((source) => selected.has(source.key))
-    onSave({
+    return onSave({
       voucher_date: voucherDate,
       receipt_line_ids: chosen.filter((source) => source.type === '收货').map((source) => source.id),
       purchase_return_line_ids: chosen.filter((source) => source.type === '退货').map((source) => source.id),
@@ -79,7 +80,7 @@ export function PayableGenerateModal({ session, onClose, onSave }) {
   }
   return (
     <div className="modal-backdrop">
-      <form className="modal payable-modal" onSubmit={submit}>
+      <AsyncForm className="modal payable-modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
             <h2>自动生成应付凭单</h2>
@@ -124,7 +125,7 @@ export function PayableGenerateModal({ session, onClose, onSave }) {
             生成凭单
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }

@@ -1,16 +1,48 @@
 from backend.domain.master_data import (
-    BusinessGroup, Company, Currency, CurrencyRate, Location, Material, MaterialCompany,
-    MaterialUomConversion, Partner, PartnerBankAccount, PartnerCompany, PartnerContact, PaymentMethod,
-    ProductCategory, TaxCode, Uom, UomCategory, Warehouse,
+    BusinessGroup,
+    Company,
+    Currency,
+    CurrencyRate,
+    Location,
+    Material,
+    MaterialCompany,
+    MaterialUomConversion,
+    Partner,
+    PartnerBankAccount,
+    PartnerCompany,
+    PartnerContact,
+    PaymentMethod,
+    ProductCategory,
+    TaxCode,
+    Uom,
+    UomCategory,
+    Warehouse,
 )
 from backend.models import CustomerAddress, DocumentEvidence
 from .api_common import ensure_editable, ensure_status_unchanged, make_viewset
-from .serializers import (
-    BusinessGroupSerializer, CompanySerializer, CurrencyRateSerializer, CurrencySerializer, CustomerAddressSerializer, DocumentEvidenceSerializer, LocationSerializer,
-    MaterialCompanySerializer, MaterialSerializer, MaterialUomConversionSerializer,
-    PartnerBankAccountSerializer, PartnerCompanySerializer, PartnerContactSerializer,
-    PartnerSerializer, PaymentMethodSerializer, ProductCategorySerializer, TaxCodeSerializer, UomCategorySerializer,
-    UomSerializer, WarehouseSerializer,
+from .serializers.master_data import (
+    BusinessGroupSerializer,
+    CompanySerializer,
+    CurrencyRateSerializer,
+    CurrencySerializer,
+    CustomerAddressSerializer,
+    LocationSerializer,
+    MaterialCompanySerializer,
+    MaterialSerializer,
+    MaterialUomConversionSerializer,
+    PartnerBankAccountSerializer,
+    PartnerCompanySerializer,
+    PartnerContactSerializer,
+    PartnerSerializer,
+    PaymentMethodSerializer,
+    ProductCategorySerializer,
+    TaxCodeSerializer,
+    UomCategorySerializer,
+    UomSerializer,
+    WarehouseSerializer,
+)
+from .serializers.system import (
+    DocumentEvidenceSerializer,
 )
 
 CompanyViewSet = make_viewset(Company, CompanySerializer)
@@ -31,6 +63,8 @@ class CustomerAddressViewSet(make_viewset(CustomerAddress, CustomerAddressSerial
 class DocumentEvidenceViewSet(make_viewset(DocumentEvidence, DocumentEvidenceSerializer)):
     def perform_create(self, serializer):
         serializer.save(uploaded_by=self.request.user.get_username())
+
+
 CurrencyViewSet = make_viewset(Currency, CurrencySerializer)
 CurrencyRateViewSet = make_viewset(CurrencyRate, CurrencyRateSerializer)
 LocationViewSet = make_viewset(Location, LocationSerializer)

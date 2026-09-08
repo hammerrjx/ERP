@@ -12,6 +12,7 @@ export function MaterialImport({ token, onNotice }) {
 
   const preview = async selectedFile => {
     if (!selectedFile) return
+    setBatch(null)
     setFile(selectedFile)
     setLoading(true); setError('')
     try {

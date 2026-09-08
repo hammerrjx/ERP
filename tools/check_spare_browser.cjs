@@ -1,5 +1,7 @@
-const { chromium } = require('C:/Users/LENOVO/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
+const apiUrl = process.env.ERP_TEST_API_URL || 'http://127.0.0.1:8013';
+const frontendUrl = process.env.ERP_FRONTEND_URL || 'http://127.0.0.1:5175';
 
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
@@ -8,24 +10,25 @@ const assert = require('node:assert/strict');
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     const headers = { Authorization: 'Token spare-isolated-browser-test-token' };
-    const existingResponse = await page.request.get('http://127.0.0.1:8013/api/delivery-order/', { headers });
+    const existingResponse = await page.request.get(apiUrl + '/api/delivery-order/', { headers });
+    assert.ok(existingResponse.ok(), 'Start tools/spare_browser_server.py before running this check');
     const existing = await existingResponse.json();
     for (const row of (existing.results || existing)) {
       if (!row.posted && row.status !== 'void') {
-        const result = await page.request.post(`http://127.0.0.1:8013/api/delivery-order/${row.id}/void/`, { headers });
+        const result = await page.request.post(`${apiUrl}/api/delivery-order/${row.id}/void/`, { headers });
         assert.ok(result.ok());
       }
     }
     await page.route('**/api/**', async route => {
       const url = new URL(route.request().url());
       if (!url.pathname.startsWith('/api/')) return route.continue();
-      const response = await route.fetch({ url: 'http://127.0.0.1:8013' + url.pathname + url.search });
+      const response = await route.fetch({ url: apiUrl + url.pathname + url.search });
       await route.fulfill({ response });
     });
     await page.addInitScript(() => localStorage.setItem('erp-session', JSON.stringify({
       token: 'spare-isolated-browser-test-token', username: '隔离验收', permissions: ['*'],
     })));
-    await page.goto('http://127.0.0.1:5175');
+    await page.goto(frontendUrl);
     await page.getByRole('button', { name: '销售管理', exact: true }).click();
     await page.getByRole('button', { name: '送货单', exact: true }).click();
     await page.getByRole('button', { name: '新增', exact: true }).click();
@@ -79,11 +82,11 @@ const assert = require('node:assert/strict');
     const savedResponse = await savedOrder;
     assert.ok(savedResponse.ok(), await savedResponse.text());
     await page.getByRole('button', { name: '保存草稿', exact: true }).waitFor({ state: 'hidden' });
-    const ordersResponse = await page.request.get('http://127.0.0.1:8013/api/sales-order/', { headers });
+    const ordersResponse = await page.request.get(apiUrl + '/api/sales-order/', { headers });
     const orders = await ordersResponse.json();
     const created = (orders.results || orders).find(order => order.customer_po === 'QA-BROWSER-SPARE');
     assert.ok(created);
-    const detail = await (await page.request.get(`http://127.0.0.1:8013/api/sales-order/${created.id}/`, { headers })).json();
+    const detail = await (await page.request.get(`${apiUrl}/api/sales-order/${created.id}/`, { headers })).json();
     assert.equal(Number(detail.lines[0].quantity), 0);
     assert.equal(Number(detail.lines[0].spare_quantity), 50);
     assert.deepEqual(errors, []);

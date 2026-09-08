@@ -1,10 +1,12 @@
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from backend.models import (
     Currency, CustomerAddress, CustomerMaterial, Location, Material, Partner, ProductCategory,
-    SalesQuote, Uom, UomCategory,
+    SalesOrder, SalesQuote, Uom, UomCategory,
 )
 from backend.test_support import SourceDatabaseIsolatedMixin
 
@@ -228,3 +230,42 @@ class SalesQuoteApiTests(SourceDatabaseIsolatedMixin, APITestCase):
         quote = self.ratify_quote("2026-05-20")
         response = self.client.delete(f"/api/sales-quote/{quote['id']}/")
         self.assertEqual(response.status_code, 400, response.data)
+
+    def test_expired_quote_is_rejected_by_conversion_and_manual_order(self):
+        quote = self.create_quote(str(timezone.localdate() - timedelta(days=10)))
+        for action in ("confirm", "approve", "ratify"):
+            self.action(quote["id"], action)
+        SalesQuote.objects.filter(pk=quote["id"]).update(expiry_date=timezone.localdate() - timedelta(days=1))
+        header = {"customer_po": "EXPIRED", "delivery_address": "收货仓",
+                  "promised_date": str(timezone.localdate())}
+        converted = self.client.post(f"/api/sales-quote/{quote['id']}/convert/", header, format="json")
+        manual = self.client.post("/api/sales-order/", {
+            **header, "customer": self.customer.pk, "currency": self.currency.pk,
+            "lines": [{"material": self.material.pk, "customer_material": self.customer_material.pk,
+                       "source_quote_line": quote["lines"][0]["id"], "uom": self.uom.pk,
+                       "quantity": "950", "spare_quantity": "50", "promised_date": header["promised_date"]}],
+        }, format="json")
+        self.assertEqual(converted.status_code, 400, converted.data)
+        self.assertEqual(manual.status_code, 400, manual.data)
+        self.assertFalse(SalesOrder.objects.exists())
+
+    def test_order_header_changes_revalidate_existing_lines_and_roll_back(self):
+        effective = timezone.localdate() - timedelta(days=10)
+        quote = self.create_quote(str(effective))
+        for action in ("confirm", "approve", "ratify"):
+            self.action(quote["id"], action)
+        converted = self.client.post(f"/api/sales-quote/{quote['id']}/convert/", {
+            "customer_po": "HEADER", "delivery_address": "收货仓", "promised_date": str(timezone.localdate()),
+        }, format="json")
+        self.assertEqual(converted.status_code, 201, converted.data)
+        order = SalesOrder.objects.get(pk=converted.data["id"])
+        currency = Currency.objects.create(code="USD-HEADER", name="美元")
+        for changes in ({"customer": self.other_customer.pk}, {"currency": currency.pk},
+                        {"order_date": str(effective - timedelta(days=1))}):
+            with self.subTest(changes=changes):
+                result = self.client.patch(f"/api/sales-order/{order.pk}/", changes, format="json")
+                self.assertEqual(result.status_code, 400, result.data)
+                order.refresh_from_db()
+                self.assertEqual(order.customer_id, self.customer.pk)
+                self.assertEqual(order.currency_id, self.currency.pk)
+                self.assertEqual(order.order_date, timezone.localdate())

@@ -172,7 +172,9 @@ SOURCE_RELATED = (
 @transaction.atomic
 def save_sheet(data, actor, instance=None, reservation=None):
     from backend.master_data.api_common import ensure_editable
-    from backend.master_data.serializers import DeliveryOrderSerializer
+    from backend.master_data.serializers.delivery import (
+    DeliveryOrderSerializer,
+)
     from rest_framework.exceptions import ValidationError as ApiValidationError
 
     selected = data.get("lines")

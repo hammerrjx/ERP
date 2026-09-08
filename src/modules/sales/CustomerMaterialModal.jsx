@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, X } from 'lucide-react'
 import { field } from '../../app/config'
 import { Field } from '../../components/Field'
+import { AsyncForm } from '../../components/PendingControls'
 
 const customerMaterialFields = [
   field('customer', '客户代码', { lookup: 'customers', required: true }),
@@ -45,12 +46,12 @@ export function CustomerMaterialModal({ lookups, record, onClose, onSave }) {
   }
   return (
     <div className="modal-backdrop">
-      <form
+      <AsyncForm
         className="modal"
         onSubmit={(event) => {
           event.preventDefault()
           const { material_name, material_specification, created_by, created_at, ...payload } = values
-          onSave(payload)
+          return onSave(payload)
         }}
       >
         <div className="modal-head">
@@ -82,7 +83,7 @@ export function CustomerMaterialModal({ lookups, record, onClose, onSave }) {
             保存
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }

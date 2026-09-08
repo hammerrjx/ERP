@@ -6,18 +6,13 @@ from rest_framework.test import APITestCase
 from openpyxl import load_workbook
 
 from backend.models import ApprovalStatus, BusinessGroup, Department, Role, UserRole
-from backend.test_support import SourceDatabaseIsolatedMixin
+from backend.test_support import ApiSupport
 
 
-class MasterDataApiTests(SourceDatabaseIsolatedMixin, APITestCase):
+class MasterDataApiTests(ApiSupport, APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_superuser("erp-admin", password="test-pass")
         self.client.force_authenticate(self.user)
-
-    def post(self, resource, payload):
-        response = self.client.post(f"/api/{resource}/", payload, format="json")
-        self.assertEqual(response.status_code, 201, response.data)
-        return response.data
 
     def test_material_uses_master_data_and_audited_approval_workflow(self):
         uom_category = self.post("uom-category", {"code": "COUNT", "name": "数量"})

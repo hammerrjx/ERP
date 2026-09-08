@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Bell,
   Boxes,
@@ -16,35 +16,28 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
-  X,
+  X
 } from 'lucide-react'
-import { api, download, listPayload, resourceApi, upload } from '../api/client'
+import { api, download, resourceApi, upload } from '../api/client'
 import { can, clearSession, readSession, saveSession } from '../auth/session'
 import { Login } from '../auth/Login'
 import { ResourceTable, Stat } from '../components/ResourceTable'
-import { ConversionModal, DetailModal, DocumentEvidenceModal, RecordModal } from '../components/ResourceModals'
+import { ConversionModal, DocumentEvidenceModal } from '../components/ResourceModals'
 import { OrderWorkflowModal } from '../components/OrderWorkflowModal'
-import { CustomerMaterialModal } from '../modules/sales/CustomerMaterialModal'
-import { SalesOrderModal } from '../modules/sales/SalesOrderModal'
-import { MaterialRecordModal } from '../modules/master-data/MaterialRecordModal'
 import { PayableGenerateModal } from '../modules/finance/PayableGenerateModal'
 import { Dashboard } from '../modules/dashboard/Dashboard'
 import { MaterialImport } from '../modules/purchase/MaterialImport'
-import { SupplierQuoteModal } from '../modules/purchase/SupplierQuoteModal'
-import { SalesQuoteModal } from '../modules/sales/SalesQuoteModal'
-import { DeliveryOrderModal } from '../modules/sales/DeliveryOrderModal'
 import { displayValue, labelFor } from '../shared/presentation'
 import { modules } from './navigation'
 import { configs } from './configs'
+import { useResourceData } from './useResourceData'
+import { ResourceModal } from './ResourceModal'
+import { PendingButton } from '../components/PendingControls'
 
 export default function App() {
   const [session, setSession] = useState(readSession)
   const [active, setActive] = useState('overview')
   const [open, setOpen] = useState({})
-  const [rows, setRows] = useState([])
-  const [lookups, setLookups] = useState({})
-  const [dashboard, setDashboard] = useState({})
-  const [dashboardError, setDashboardError] = useState('')
   const [query, setQuery] = useState('')
   const [modal, setModal] = useState(false)
   const [editor, setEditor] = useState(null)
@@ -54,17 +47,27 @@ export default function App() {
   const [workflow, setWorkflow] = useState(null)
   const [evidenceRow, setEvidenceRow] = useState(null)
   const [notice, setNotice] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [dashboardLoading, setDashboardLoading] = useState(false)
   const [mobileNav, setMobileNav] = useState(false)
-  const [deliveryLookupsLoading, setDeliveryLookupsLoading] = useState(false)
-  const requestSequence = useRef(0)
-  const lookupCache = useRef(new Map())
-  const deliveryLookupsLoaded = useRef(false)
-  const deliveryLookupsPromise = useRef(null)
-  const salesOrderLookupsLoaded = useRef(false)
   const current = configs[active]
+  const {
+    rows,
+    lookups,
+    dashboard,
+    dashboardError,
+    error,
+    loading,
+    dashboardLoading,
+    deliveryLookupsLoading,
+    setError,
+    loadConfig,
+    loadDashboard,
+    loadDeliveryLookups,
+    loadSalesOrderLookups,
+    invalidateDeliveryLookups,
+    invalidateLookup,
+    resetPage,
+    resetData
+  } = useResourceData(session, active)
 
   const allowedModules = useMemo(
     () =>
@@ -73,7 +76,7 @@ export default function App() {
           module.items
             ? {
                 ...module,
-                items: module.items.filter(([id]) => can(session, configs[id].permission)),
+                items: module.items.filter(([id]) => can(session, configs[id].permission))
               }
             : module
         )
@@ -81,221 +84,20 @@ export default function App() {
     [session]
   )
 
-  const loadLookup = useCallback(
-    async (id) => {
-      const cfg = configs[id]
-      if (!cfg || !can(session, cfg.permission)) return [id, []]
-      if (lookupCache.current.has(id)) return [id, lookupCache.current.get(id)]
-      const data = listPayload(await resourceApi(cfg.resource, session.token).list())
-      const filtered = cfg.filter ? data.filter(cfg.filter) : data
-      if (
-        [
-          'customers',
-          'customerAddresses',
-          'materials',
-          'customerMaterials',
-          'uoms',
-          'currencies',
-          'businessGroups',
-          'paymentMethods',
-          'employees',
-          'locations',
-        ].includes(id)
-      ) {
-        lookupCache.current.set(id, filtered)
-      }
-      return [id, filtered]
-    },
-    [session]
-  )
-
-  const loadConfig = useCallback(
-    async (target) => {
-      const cfg = configs[target]
-      if (!cfg || !can(session, cfg.permission)) return
-      const requestId = ++requestSequence.current
-      setLoading(true)
-      setError('')
-      try {
-        const allLookupIds = [
-          ...new Set([
-            ...cfg.fields.filter((item) => item.lookup).map((item) => item.lookup),
-            ...(cfg.extraLookups || []),
-          ]),
-        ]
-        const lookupIds =
-          cfg.resource === 'delivery-order' || cfg.resource === 'sales-order'
-            ? allLookupIds.filter((id) => id === 'customers')
-            : allLookupIds
-        const lookupPromise = Promise.all(lookupIds.map(loadLookup))
-        const dataPromise = resourceApi(cfg.resource, session.token).list()
-        dataPromise
-          .then((result) => {
-            if (requestId !== requestSequence.current) return
-            let data = listPayload(result)
-            if (cfg.filter) data = data.filter(cfg.filter)
-            setRows(data)
-            setLoading(false)
-          })
-          .catch((requestError) => {
-            if (requestId === requestSequence.current) {
-              setError(requestError.message)
-              setLoading(false)
-            }
-          })
-        lookupPromise
-          .then((entries) => {
-            if (requestId !== requestSequence.current) return
-            if (entries.length) setLookups((previous) => ({ ...previous, ...Object.fromEntries(entries) }))
-          })
-          .catch((requestError) => {
-            if (requestId === requestSequence.current) setError(requestError.message)
-          })
-        await dataPromise
-      } catch (requestError) {
-        if (requestId === requestSequence.current) setError(requestError.message)
-      } finally {
-        // The main list clears loading as soon as it is available; lookups may continue in the background.
-      }
-    },
-    [session, loadLookup]
-  )
-
-  const loadDeliveryLookups = useCallback(async () => {
-    if (deliveryLookupsLoaded.current) return
-    if (deliveryLookupsPromise.current) return deliveryLookupsPromise.current
-    const ids = ['customerAddresses', 'locations']
-    setDeliveryLookupsLoading(true)
-    deliveryLookupsPromise.current = (async () => {
-      try {
-        const entries = await Promise.all(ids.map(loadLookup))
-        setLookups((previous) => ({ ...previous, ...Object.fromEntries(entries) }))
-        deliveryLookupsLoaded.current = true
-      } catch (requestError) {
-        setError(requestError.message)
-        throw requestError
-      } finally {
-        deliveryLookupsPromise.current = null
-        setDeliveryLookupsLoading(false)
-      }
-    })()
-    return deliveryLookupsPromise.current
-  }, [loadLookup])
-
-  const invalidateDeliveryLookups = () => {
-    deliveryLookupsLoaded.current = false
-  }
-
-  const loadSalesOrderLookups = useCallback(async () => {
-    if (salesOrderLookupsLoaded.current) return
-    salesOrderLookupsLoaded.current = true
-    const ids = [
-      'customerAddresses',
-      'businessGroups',
-      'paymentMethods',
-      'currencies',
-      'materials',
-      'uoms',
-      'customerMaterials',
-      'employees',
-    ]
-    try {
-      const entries = await Promise.all(ids.map(loadLookup))
-      setLookups((previous) => ({ ...previous, ...Object.fromEntries(entries) }))
-    } catch (requestError) {
-      salesOrderLookupsLoaded.current = false
-      setError(requestError.message)
-    }
-  }, [loadLookup])
-
-  const loadDashboard = useCallback(async () => {
-    const requestId = ++requestSequence.current
-    setDashboardLoading(true)
-    setDashboardError('')
-    const ids = ['materials', 'salesOrders', 'purchaseOrders', 'balances', 'alerts'].filter((id) =>
-      can(session, configs[id].permission)
-    )
-    const entries = await Promise.all(
-      ids.map(async (id) => {
-        try {
-          return [id, listPayload(await resourceApi(configs[id].resource, session.token).list()), '']
-        } catch (requestError) {
-          return [id, null, `${configs[id].title}: ${requestError.message}`]
-        }
-      })
-    )
-    if (requestId === requestSequence.current) {
-      setDashboard(Object.fromEntries(entries.map(([id, data]) => [id, data])))
-      setDashboardError(
-        entries
-          .map(([, , message]) => message)
-          .filter(Boolean)
-          .join('；')
-      )
-      setDashboardLoading(false)
-    }
-  }, [session])
-
-  useEffect(() => {
-    if (!session) return
-    if (active === 'overview') loadDashboard()
-    else if (active !== 'materialImport') loadConfig(active)
-  }, [active, loadConfig, loadDashboard, session])
-
   const select = (id) => {
     setActive(id)
     setQuery('')
     setNotice('')
-    setError('')
     setMobileNav(false)
-    setRows([])
-    deliveryLookupsLoaded.current = false
-    salesOrderLookupsLoaded.current = false
-    setLoading(id !== 'overview' && id !== 'materialImport')
-    setDashboardLoading(id === 'overview')
-    setDashboardError('')
+    resetPage(id)
   }
   const logout = () => {
     clearSession()
-    lookupCache.current.clear()
+    resetData()
     setSession(null)
-    setRows([])
-    setLookups({})
-    setDashboard({})
-    setDashboardError('')
-  }
-  const invalidateLookup = (resource) => {
-    const lookupByResource = {
-      partner: 'customers',
-      'customer-address': 'customerAddresses',
-      material: 'materials',
-      'customer-material': 'customerMaterials',
-      uom: 'uoms',
-      currency: 'currencies',
-      'business-group': 'businessGroups',
-      'payment-method': 'paymentMethods',
-      employee: 'employees',
-      location: 'locations',
-    }
-    const id = lookupByResource[resource]
-    if (id) lookupCache.current.delete(id)
   }
   const refresh = () =>
     active === 'overview' ? loadDashboard() : active === 'materialImport' ? undefined : loadConfig(active)
-  const add = async (values) => {
-    const payload = Object.fromEntries(
-      Object.entries(values).filter(([, value]) => value !== '' && value !== undefined)
-    )
-    try {
-      await resourceApi(current.resource, session.token).create(payload)
-      invalidateLookup(current.resource)
-      setModal(false)
-      await loadConfig(active)
-      setNotice(`已创建${current.title}`)
-    } catch (requestError) {
-      setError(requestError.message)
-    }
-  }
   const saveRecord = async (values, row) => {
     const payload = Object.fromEntries(
       Object.entries(values).filter(([, value]) => value !== '' && value !== undefined)
@@ -316,7 +118,7 @@ export default function App() {
     await api(row?.id ? '/delivery-order/' + row.id + '/save-sheet/' : '/delivery-order/save-sheet/', {
       token: session.token,
       method: 'POST',
-      body: values,
+      body: values
     })
     invalidateDeliveryLookups()
     invalidateLookup('sales-order')
@@ -335,7 +137,7 @@ export default function App() {
       status: 'draft',
       is_confirmed: false,
       is_ratified: false,
-      lines: sourceLine ? [{ ...sourceLine, id: undefined }] : [],
+      lines: sourceLine ? [{ ...sourceLine, id: undefined }] : []
     })
     setModal(true)
   }
@@ -343,6 +145,11 @@ export default function App() {
     if (!window.confirm(`确认删除${current.title} ${labelFor(row)}？`)) return
     try {
       await resourceApi(current.resource, session.token).remove(row.id)
+      invalidateLookup(current.resource)
+      if (editor?.id === row.id) {
+        setEditor(null)
+        setModal(false)
+      }
       await loadConfig(active)
       setNotice(`已删除${current.title}`)
     } catch (requestError) {
@@ -354,7 +161,7 @@ export default function App() {
       const generated = await api('/payable-voucher/auto-generate/', {
         token: session.token,
         method: 'POST',
-        body: values,
+        body: values
       })
       setPayableModal(false)
       await loadConfig(active)
@@ -383,7 +190,7 @@ export default function App() {
             : await api('/delivery-order/generate-from-order/', {
                 token: session.token,
                 method: 'POST',
-                body: { ...values, sales_order: workflow.row.id },
+                body: { ...values, sales_order: workflow.row.id }
               })
       if (workflow.kind === 'delivery') invalidateDeliveryLookups()
       setWorkflow(null)
@@ -420,6 +227,11 @@ export default function App() {
   const transition = async (row, action) => {
     try {
       await resourceApi(current.resource, session.token).action(row.id, action)
+      invalidateLookup(current.resource)
+      if (editor?.id === row.id) {
+        setEditor(null)
+        setModal(false)
+      }
       if (current.resource === 'delivery-order') invalidateDeliveryLookups()
       await loadConfig(active)
       setNotice(
@@ -432,7 +244,7 @@ export default function App() {
           ratify: '报价已核准',
           unratify: '报价已反核准',
           'sales-confirm': '报价已销售确认',
-          'sales-unconfirm': '报价已反销售确认',
+          'sales-unconfirm': '报价已反销售确认'
         }[action] || '状态已更新'
       )
     } catch (requestError) {
@@ -443,7 +255,7 @@ export default function App() {
     try {
       const body = {
         ...(filtered ? { ids: filteredRows.map((row) => row.id) } : {}),
-        ...(current.partnerKind ? { partner_kind: current.partnerKind } : {}),
+        ...(current.partnerKind ? { partner_kind: current.partnerKind } : {})
       }
       const file = await download(`/${current.resource}/export/`, { token: session.token, body })
       const url = URL.createObjectURL(file.blob)
@@ -468,7 +280,7 @@ export default function App() {
     return (
       <Login
         onLogin={(next) => {
-          lookupCache.current.clear()
+          resetData()
           saveSession(next)
           setSession(next)
         }}
@@ -677,14 +489,14 @@ export default function App() {
                 </button>
                 {current.exportable ? (
                   <>
-                    <button className="secondary export-button" onClick={() => exportRecords(true)} disabled={loading}>
+                    <PendingButton className="secondary export-button" onClick={() => exportRecords(true)} disabled={loading}>
                       <Download size={16} />
                       导出当前
-                    </button>
-                    <button className="secondary export-button" onClick={() => exportRecords(false)} disabled={loading}>
+                    </PendingButton>
+                    <PendingButton className="secondary export-button" onClick={() => exportRecords(false)} disabled={loading}>
                       <Download size={16} />
                       导出全部
-                    </button>
+                    </PendingButton>
                   </>
                 ) : null}
                 {canGeneratePayables ? (
@@ -766,124 +578,37 @@ export default function App() {
         )}
       </main>
       {modal || editor ? (
-        current.resource === 'material' ? (
-          <MaterialRecordModal
-            config={current}
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-          />
-        ) : current.resource === 'customer-material' ? (
-          <CustomerMaterialModal
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-          />
-        ) : current.resource === 'sales-order' ? (
-          <SalesOrderModal
-            key={`sales-order-${editor?.id || 'new'}`}
-            token={session.token}
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-            onDelete={editor ? () => removeRecord(editor) : undefined}
-            onAction={(action) =>
-              action === 'new' ? setEditor(null) : editor ? transition(editor, action) : undefined
-            }
-          />
-        ) : current.resource === 'delivery-order' ? (
-          <DeliveryOrderModal
-            token={session.token}
-            key={`delivery-order-${editor?.id || 'new'}`}
-            lookups={lookups}
-            record={editor}
-            loading={deliveryLookupsLoading}
-            error={error}
-            onClearError={() => setError('')}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-              setError('')
-            }}
-            onSave={(values) => saveDeliveryOrder(values, editor)}
-          />
-        ) : current.resource === 'sales-quote' ? (
-          <SalesQuoteModal
-            token={session.token}
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-          />
-        ) : current.resource === 'supplier-quote' ? (
-          <SupplierQuoteModal
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-          />
-        ) : (
-          <RecordModal
-            config={current}
-            lookups={lookups}
-            record={editor}
-            onClose={() => {
-              setModal(false)
-              setEditor(null)
-            }}
-            onSave={(values) => (editor ? saveRecord(values, editor) : add(values))}
-          />
-        )
+        <ResourceModal
+          key={`${current.resource}-${editor?.id || 'new'}`}
+          config={current}
+          record={editor}
+          token={session.token}
+          lookups={lookups}
+          loading={deliveryLookupsLoading}
+          error={error}
+          onClearError={() => setError('')}
+          onClose={() => {
+            setModal(false)
+            setEditor(null)
+            setError('')
+          }}
+          onSave={(values) =>
+            current.resource === 'delivery-order' ? saveDeliveryOrder(values, editor) : saveRecord(values, editor)
+          }
+          onDelete={editor ? () => removeRecord(editor) : undefined}
+          onAction={(action) => (action === 'new' ? setEditor(null) : editor ? transition(editor, action) : undefined)}
+        />
       ) : null}
       {detail ? (
-        current.resource === 'sales-order' ? (
-          <SalesOrderModal
-            token={session.token}
-            lookups={lookups}
-            record={detail}
-            readOnly
-            onClose={() => setDetail(null)}
-          />
-        ) : current.resource === 'sales-quote' ? (
-          <SalesQuoteModal
-            token={session.token}
-            lookups={lookups}
-            record={detail}
-            readOnly
-            onClose={() => setDetail(null)}
-          />
-        ) : current.resource === 'supplier-quote' ? (
-          <SupplierQuoteModal lookups={lookups} record={detail} readOnly onClose={() => setDetail(null)} />
-        ) : current.resource === 'delivery-order' ? (
-          <DeliveryOrderModal
-            token={session.token}
-            lookups={lookups}
-            record={detail}
-            loading={deliveryLookupsLoading}
-            readOnly
-            onClose={() => setDetail(null)}
-          />
-        ) : (
-          <DetailModal config={current} row={detail} lookups={lookups} onClose={() => setDetail(null)} />
-        )
+        <ResourceModal
+          config={current}
+          record={detail}
+          token={session.token}
+          lookups={lookups}
+          loading={deliveryLookupsLoading}
+          readOnly
+          onClose={() => setDetail(null)}
+        />
       ) : null}
       {payableModal ? (
         <PayableGenerateModal session={session} onClose={() => setPayableModal(false)} onSave={generatePayables} />

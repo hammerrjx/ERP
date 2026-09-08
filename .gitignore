@@ -26,10 +26,8 @@ tmp/
 outputs/
 .codex/
 .memorax-code/
-# Conversation plans, investigation reports, and generated documentation
-/mymd/
-/docs/
-/backend/docs/
+# Local conversation history and investigation archives
+/archive/
 # Local environment variants
 .env.*
 !.env.example

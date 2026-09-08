@@ -1,6 +1,8 @@
 from django.test import TestCase
 
-from backend.master_data.serializers import PartnerSerializer
+from backend.master_data.serializers.master_data import (
+    PartnerSerializer,
+)
 from backend.models import Partner, PaymentMethod
 
 

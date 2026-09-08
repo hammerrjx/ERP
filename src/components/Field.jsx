@@ -42,7 +42,16 @@ export function Field({ field: item, value, options, onChange }) {
       </label>
     )
   if (item.lookup || item.key === 'address_code')
-    return <SearchableLookup field={item} value={value} options={options} onChange={onChange} />
+    return (
+      <SearchableLookup
+        label={item.label}
+        required={item.required}
+        customerMaterial={item.lookup === 'customerMaterials'}
+        value={value}
+        options={options}
+        onChange={onChange}
+      />
+    )
   if (item.kind === 'select') {
     const selectOptions = item.lookup
       ? options.map((option) => ({ value: option.id, label: labelFor(option) }))
@@ -87,48 +96,76 @@ export function Field({ field: item, value, options, onChange }) {
   )
 }
 
-function SearchableLookup({ field: item, value, options, onChange }) {
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
-  const selected = options.find((option) => option.id === Number(value))
-  const customerMaterial = item.lookup === 'customerMaterials'
-  const optionCode = (option) =>
+export function ReadonlyField({ label, value }) {
+  return (
+    <label>
+      <span>{label}</span>
+      <input value={value ?? ''} readOnly />
+    </label>
+  )
+}
+
+export function SearchableLookup({
+  label,
+  value,
+  options = [],
+  onChange,
+  required = false,
+  disabled = false,
+  customerMaterial = false,
+  className = '',
+  clearOnFocus = false,
+  optionCode = (option) =>
     customerMaterial
       ? option.customer_code || option.code || option.material_code
-      : option.code || option.number || option.username || option.name || option.material_code
-  const optionText = (option) =>
+      : option.code || option.number || option.username || option.name || option.material_code,
+  optionText = (option) =>
     [
       optionCode(option),
       option.name,
       option.customer_name,
       option.material_name,
       option.specification,
-      option.material_specification,
+      option.material_specification
     ]
       .filter(Boolean)
       .join(' ')
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const selected = options.find((option) => option.id === Number(value))
   const selectedLabel = selected ? optionCode(selected) : ''
   const visible = options
     .filter((option) => optionText(option).toLowerCase().includes(query.trim().toLowerCase()))
     .slice(0, 30)
+  const display = clearOnFocus ? (open ? query : selectedLabel) : query || selectedLabel
   return (
-    <label className={`lookup-field ${customerMaterial ? 'customer-material-lookup' : ''}`}>
+    <label className={`lookup-field ${className} ${customerMaterial ? 'customer-material-lookup' : ''}`}>
       <span>
-        {item.label}
-        {item.required ? <em>*</em> : null}
+        {label}
+        {required ? <em>*</em> : null}
       </span>
       <input
-        required={item.required}
-        value={query || (selected ? selectedLabel : '')}
+        required={required}
+        disabled={disabled}
+        value={display}
         placeholder="输入代码或名称检索"
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          setOpen(true)
+          if (clearOnFocus) setQuery('')
+        }}
         onChange={(event) => {
           setOpen(true)
           setQuery(event.target.value)
         }}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={() =>
+          setTimeout(() => {
+            setOpen(false)
+            setQuery('')
+          }, 150)
+        }
       />
-      {open ? (
+      {open && !disabled ? (
         <div className="lookup-menu">
           {visible.map((option) => (
             <button
@@ -142,9 +179,10 @@ function SearchableLookup({ field: item, value, options, onChange }) {
               }}
             >
               <strong>{optionCode(option)}</strong>
-              {option.name || option.customer_name || option.material_name ? (
-                <span>{option.name || option.customer_name || option.material_name}</span>
-              ) : null}
+              <span>
+                {option.name || option.customer_name || option.material_name}
+                {className === 'line-lookup' && option.material_code ? ` · ${option.material_code}` : ''}
+              </span>
             </button>
           ))}
           {visible.length === 0 ? <div className="lookup-empty">无匹配项</div> : null}

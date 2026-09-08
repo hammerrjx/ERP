@@ -4,9 +4,14 @@ from rest_framework import permissions, viewsets
 from backend.domain.system import ApprovalRule, AuditEvent, Department, Role, UserRole
 from backend.models import Employee
 from .api_common import make_viewset
-from .serializers import (
-    ApprovalRuleSerializer, AuditEventSerializer, DepartmentSerializer, EmployeeSerializer, RoleSerializer,
-    UserAccountSerializer, UserRoleSerializer,
+from .serializers.system import (
+    ApprovalRuleSerializer,
+    AuditEventSerializer,
+    DepartmentSerializer,
+    EmployeeSerializer,
+    RoleSerializer,
+    UserAccountSerializer,
+    UserRoleSerializer,
 )
 
 AuditEventViewSet = make_viewset(AuditEvent, AuditEventSerializer)

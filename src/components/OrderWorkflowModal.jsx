@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
 import { api, listPayload } from '../api/client'
 import { today } from '../shared/presentation'
+import { AsyncForm } from './PendingControls'
 
 export function OrderWorkflowModal({ workflow, row, session, onClose, onSave }) {
   const isMrp = workflow === 'mrp'
@@ -84,7 +85,7 @@ export function OrderWorkflowModal({ workflow, row, session, onClose, onSave }) 
   const submit = (event) => {
     event.preventDefault()
     const selected = sourceLines.filter((line) => line.selected)
-    onSave(
+    return onSave(
       isMrp
         ? values
         : {
@@ -185,7 +186,7 @@ export function OrderWorkflowModal({ workflow, row, session, onClose, onSave }) 
   ) : null
   return (
     <div className="modal-backdrop">
-      <form className="modal workflow-modal" onSubmit={submit}>
+      <AsyncForm className="modal workflow-modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
             <h2>{title}</h2>
@@ -343,7 +344,7 @@ export function OrderWorkflowModal({ workflow, row, session, onClose, onSave }) 
             {isMrp ? '生成请购草稿' : isReceipt ? '生成收货草稿' : '生成送货草稿'}
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }

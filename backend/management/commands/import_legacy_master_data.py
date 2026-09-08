@@ -414,7 +414,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--source-dir", required=True, type=Path)
         parser.add_argument("--per-category", type=int, default=3)
-        parser.add_argument("--report", type=Path, default=Path("docs/legacy-import-report.md"))
+        parser.add_argument("--report", type=Path, default=Path("outputs/legacy-import-report.md"))
         parser.add_argument("--replace", action="store_true", help="清空现有基础资料后重新导入")
 
     def handle(self, *args, **options):

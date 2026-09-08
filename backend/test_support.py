@@ -1,7 +1,9 @@
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
 
 import xlwt
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 
 
 def write_departments(path, rows):
@@ -21,6 +23,11 @@ class SourceDatabaseIsolatedMixin:
 
     @classmethod
     def setUpClass(cls):
+        media = TemporaryDirectory()
+        cls.addClassCleanup(media.cleanup)
+        settings = override_settings(MEDIA_ROOT=media.name, ERP_DELIVERY_POST_STOCK=False)
+        settings.enable()
+        cls.addClassCleanup(settings.disable)
         cls._source_codes_patcher = patch("backend.material_codes._source_codes", return_value=None)
         cls._source_codes_patcher.start()
         try:
@@ -37,7 +44,7 @@ class SourceDatabaseIsolatedMixin:
             cls._source_codes_patcher.stop()
 
 
-class CoreFlowSupport(SourceDatabaseIsolatedMixin):
+class ApiSupport(SourceDatabaseIsolatedMixin):
     def setUp(self):
         self.user = get_user_model().objects.create_superuser("flow-admin", password="pass")
         self.client.force_authenticate(self.user)
@@ -47,6 +54,8 @@ class CoreFlowSupport(SourceDatabaseIsolatedMixin):
         self.assertEqual(response.status_code, 201, response.data)
         return response.data
 
+
+class CoreFlowSupport(ApiSupport):
     def approve(self, resource, record_id):
         submitted = self.client.post(f"/api/{resource}/{record_id}/submit/", {}, format="json")
         self.assertEqual(submitted.status_code, 200, submitted.data)

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, X } from 'lucide-react'
 import { field } from '../../app/config'
 import { Field } from '../../components/Field'
+import { AsyncForm } from '../../components/PendingControls'
 
 const materialTabs = [
   {
@@ -123,11 +124,11 @@ export function MaterialRecordModal({ config: cfg, lookups, record, onClose, onS
   }
   return (
     <div className="modal-backdrop">
-      <form
+      <AsyncForm
         className="modal material-modal"
         onSubmit={(event) => {
           event.preventDefault()
-          onSave(values)
+          return onSave(values)
         }}
       >
         <div className="modal-head">
@@ -180,7 +181,7 @@ export function MaterialRecordModal({ config: cfg, lookups, record, onClose, onS
             保存物料
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }

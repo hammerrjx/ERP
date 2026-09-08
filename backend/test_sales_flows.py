@@ -54,46 +54,36 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         self.assertEqual(line["tax_included_amount"], "1500.00000000")
         self.assertEqual(line["untaxed_amount"], "1500.00000000")
 
-    def test_manual_quote_line_rejects_quote_outside_order_date(self):
-        context = self.base_context()
-        quote = self.post("sales-quote", {
-            "customer": context["customer"]["id"], "currency": context["currency"]["id"],
-            "effective_date": "2026-10-01",
-            "lines": [{"material": context["material"]["id"], "unit_price": "15"}],
-        })
-        for action in ("confirm", "approve", "ratify"):
-            response = self.client.post(f"/api/sales-quote/{quote['id']}/{action}/", {}, format="json")
-            self.assertEqual(response.status_code, 200, response.data)
-        response = self.client.post("/api/sales-order/", {
-            "customer": context["customer"]["id"], "currency": context["currency"]["id"],
-            "customer_po": "PO-DATE-CHECK", "delivery_address": "客户仓",
-            "order_date": "2026-09-01", "promised_date": "2026-09-05",
-            "lines": [{"material": context["material"]["id"], "uom": context["uom"]["id"],
-                       "quantity": "1", "promised_date": "2026-09-05",
-                       "source_quote_line": quote["lines"][0]["id"]}],
-        }, format="json")
-        self.assertEqual(response.status_code, 400, response.data)
-
-    def test_manual_quote_line_rejects_currency_mismatch(self):
+    def test_manual_quote_line_rejects_invalid_date_or_currency_without_writes(self):
+        from backend.models import SalesOrder, SalesOrderLine
         context = self.base_context()
         usd = self.post("currency", {"code": "USD", "name": "美元", "symbol": "$"})
-        quote = self.post("sales-quote", {
-            "customer": context["customer"]["id"], "currency": usd["id"],
-            "effective_date": "2026-08-20",
-            "lines": [{"material": context["material"]["id"], "unit_price": "15"}],
-        })
-        for action in ("confirm", "approve", "ratify"):
-            response = self.client.post(f"/api/sales-quote/{quote['id']}/{action}/", {}, format="json")
-            self.assertEqual(response.status_code, 200, response.data)
-        response = self.client.post("/api/sales-order/", {
-            "customer": context["customer"]["id"], "currency": context["currency"]["id"],
-            "customer_po": "PO-CURRENCY-CHECK", "delivery_address": "客户仓",
-            "order_date": "2026-09-01", "promised_date": "2026-09-05",
-            "lines": [{"material": context["material"]["id"], "uom": context["uom"]["id"],
-                       "quantity": "1", "promised_date": "2026-09-05",
-                       "source_quote_line": quote["lines"][0]["id"]}],
-        }, format="json")
-        self.assertEqual(response.status_code, 400, response.data)
+        scenarios = [
+            ("date", "2026-10-01", context["currency"]["id"], "来源销售报价在订单日期无效"),
+            ("currency", "2026-08-20", usd["id"], "来源报价的客户、物料、客户料号或币种与订单不一致"),
+        ]
+        for name, effective_date, currency, message in scenarios:
+            with self.subTest(scenario=name):
+                quote = self.post("sales-quote", {
+                    "customer": context["customer"]["id"], "currency": currency,
+                    "effective_date": effective_date,
+                    "lines": [{"material": context["material"]["id"], "unit_price": "15"}],
+                })
+                for action in ("confirm", "approve", "ratify"):
+                    response = self.client.post(f"/api/sales-quote/{quote['id']}/{action}/", {}, format="json")
+                    self.assertEqual(response.status_code, 200, response.data)
+                response = self.client.post("/api/sales-order/", {
+                    "customer": context["customer"]["id"], "currency": context["currency"]["id"],
+                    "customer_po": "PO-" + name, "delivery_address": "客户仓",
+                    "order_date": "2026-09-01", "promised_date": "2026-09-05",
+                    "lines": [{"material": context["material"]["id"], "uom": context["uom"]["id"],
+                               "quantity": "1", "promised_date": "2026-09-05",
+                               "source_quote_line": quote["lines"][0]["id"]}],
+                }, format="json")
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertIn(message, str(response.data))
+                self.assertFalse(SalesOrder.objects.exists())
+                self.assertFalse(SalesOrderLine.objects.exists())
 
     def test_approved_sales_quote_converts_to_order_with_delivery_promise(self):
         context = self.base_context()

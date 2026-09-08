@@ -1,5 +1,6 @@
 """Django model discovery and compatibility imports; implementations live in domain."""
 
+from .domain.finance import PayableVoucher, PayableVoucherLine
 from .domain.base import (
     ApprovalStatus,
     AuditedModel,
@@ -52,8 +53,6 @@ from .domain.master_data import (
 from .domain.purchase import (
     GoodsReceipt,
     GoodsReceiptLine,
-    PayableVoucher,
-    PayableVoucherLine,
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseRequisition,

@@ -487,6 +487,12 @@ class SalesOrderLine(models.Model):
         if self.source_quote_line_id:
             quote_line = self.source_quote_line
             quote = quote_line.quote
+            if not quote.is_ratified:
+                raise ValidationError({"source_quote_line": "来源销售报价未核准"})
+            if quote.effective_date > self.order.order_date or (
+                quote.expiry_date and quote.expiry_date < self.order.order_date
+            ):
+                raise ValidationError({"source_quote_line": "来源销售报价在订单日期无效"})
             customer_code = self.customer_material.customer_code if self.customer_material_id else ""
             if (
                 quote.customer_id != self.order.customer_id

@@ -1,3 +1,4 @@
+from backend.domain.finance import PayableVoucher, PayableVoucherLine
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -7,27 +8,52 @@ from django.utils import timezone
 from rest_framework import decorators, response, serializers
 
 from backend.domain.purchase import (
-    GoodsReceipt, GoodsReceiptLine, PayableVoucher,
-    PayableVoucherLine, PurchaseOrder, PurchaseOrderLine, PurchaseRequisition,
-    PurchaseRequisitionLine, PurchaseReturn, PurchaseReturnLine, RequestForQuotation,
-    RfqLine, SupplierInquiry, SupplierQuote, SupplierQuoteLine,
+    GoodsReceipt,
+    GoodsReceiptLine,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseRequisition,
+    PurchaseRequisitionLine,
+    PurchaseReturn,
+    PurchaseReturnLine,
+    RequestForQuotation,
+    RfqLine,
+    SupplierInquiry,
+    SupplierQuote,
+    SupplierQuoteLine,
 )
 from backend.domain.system import ApprovalStatus, AuditEvent
 from .api_common import ApprovalViewSet, make_viewset
 from .exports import supplier_quote_workbook_response
-from .serializers import (
-    GoodsReceiptLineSerializer, GoodsReceiptSerializer, PayableVoucherLineSerializer,
-    PayableVoucherSerializer, PurchaseOrderLineSerializer, PurchaseOrderSerializer,
-    PurchaseRequisitionLineSerializer, PurchaseRequisitionSerializer,
-    PurchaseReturnLineSerializer, PurchaseReturnSerializer, RequestForQuotationSerializer,
-    RfqLineSerializer, SupplierInquirySerializer, SupplierQuoteLineSerializer,
+from .serializers.purchase import (
+    GoodsReceiptLineSerializer,
+    GoodsReceiptSerializer,
+    PayableVoucherLineSerializer,
+    PayableVoucherSerializer,
+    PurchaseOrderLineSerializer,
+    PurchaseOrderSerializer,
+    PurchaseRequisitionLineSerializer,
+    PurchaseRequisitionSerializer,
+    PurchaseReturnLineSerializer,
+    PurchaseReturnSerializer,
+    RequestForQuotationSerializer,
+    RfqLineSerializer,
+    SupplierInquirySerializer,
+    SupplierQuoteLineSerializer,
     SupplierQuoteSerializer,
 )
 
+
 class SupplierQuoteViewSet(ApprovalViewSet):
     queryset = SupplierQuote.objects.select_related(
-        "supplier", "business_group", "currency", "material__uom", "material__category", "purchase_uom",
-        "operation__routing__material", "parent_material",
+        "supplier",
+        "business_group",
+        "currency",
+        "material__uom",
+        "material__category",
+        "purchase_uom",
+        "operation__routing__material",
+        "parent_material",
     ).prefetch_related("lines")
     serializer_class = SupplierQuoteSerializer
 
@@ -39,17 +65,24 @@ class SupplierQuoteViewSet(ApprovalViewSet):
             raise serializers.ValidationError({name: "此参数必填" for name in missing})
         quote_type = request.query_params.get("quote_type", SupplierQuote.QuoteType.PURCHASE)
         target_date = request.query_params["date"]
-        quote = self.get_queryset().filter(
-            supplier_id=request.query_params["supplier"],
-            material_id=request.query_params["material"],
-            quote_type=quote_type,
-            status=ApprovalStatus.APPROVED,
-            is_confirmed=True,
-            is_ratified=True,
-            effective_date__lte=target_date,
-        ).filter(Q(expiry_date__isnull=True) | Q(expiry_date__gte=target_date)).order_by(
-            "-effective_date", "-created_at",
-        ).first()
+        quote = (
+            self.get_queryset()
+            .filter(
+                supplier_id=request.query_params["supplier"],
+                material_id=request.query_params["material"],
+                quote_type=quote_type,
+                status=ApprovalStatus.APPROVED,
+                is_confirmed=True,
+                is_ratified=True,
+                effective_date__lte=target_date,
+            )
+            .filter(Q(expiry_date__isnull=True) | Q(expiry_date__gte=target_date))
+            .order_by(
+                "-effective_date",
+                "-created_at",
+            )
+            .first()
+        )
         if not quote:
             raise serializers.ValidationError("未找到匹配日期、类型和状态的有效供应商报价")
         try:
@@ -57,11 +90,13 @@ class SupplierQuoteViewSet(ApprovalViewSet):
         except DjangoValidationError as exc:
             raise serializers.ValidationError(exc.messages) from exc
         data = self.get_serializer(quote).data
-        data.update({
-            "resolved_unit_price": format(unit_price, ".8f"),
-            "resolved_line": tier.pk if tier else None,
-            "resolved_min_qty": format(tier.min_qty, ".8f") if tier else "0.00000000",
-        })
+        data.update(
+            {
+                "resolved_unit_price": format(unit_price, ".8f"),
+                "resolved_line": tier.pk if tier else None,
+                "resolved_min_qty": format(tier.min_qty, ".8f") if tier else "0.00000000",
+            }
+        )
         return response.Response(data)
 
     @decorators.action(detail=True, methods=["post"], url_path="sales-confirm")
@@ -88,6 +123,8 @@ PurchaseRequisitionLineViewSet = make_viewset(PurchaseRequisitionLine, PurchaseR
 RfqViewSet = make_viewset(RequestForQuotation, RequestForQuotationSerializer)
 RfqLineViewSet = make_viewset(RfqLine, RfqLineSerializer)
 SupplierInquiryViewSet = make_viewset(SupplierInquiry, SupplierInquirySerializer)
+
+
 class PurchaseOrderViewSet(ApprovalViewSet):
     queryset = PurchaseOrder.objects.all()
     serializer_class = PurchaseOrderSerializer
@@ -117,8 +154,7 @@ class PurchaseOrderViewSet(ApprovalViewSet):
         if selected is not None and not isinstance(selected, list):
             raise serializers.ValidationError({"lines": "收货明细必须是列表"})
         requested_lines = {
-            item.get("purchase_order_line"): item for item in (selected or [])
-            if item.get("purchase_order_line")
+            item.get("purchase_order_line"): item for item in (selected or []) if item.get("purchase_order_line")
         }
         if selected is not None and len(requested_lines) != len(selected):
             raise serializers.ValidationError({"lines": "每条收货明细必须且只能选择一个采购订单行"})
@@ -128,7 +164,11 @@ class PurchaseOrderViewSet(ApprovalViewSet):
             if selected is not None and source is None:
                 continue
             found_line_ids.add(order_line.pk)
-            quantity = Decimal(str(source.get("quantity"))) if source and source.get("quantity") is not None else order_line.quantity - order_line.received_quantity
+            quantity = (
+                Decimal(str(source.get("quantity")))
+                if source and source.get("quantity") is not None
+                else order_line.quantity - order_line.received_quantity
+            )
             if quantity <= 0:
                 continue
             line = GoodsReceiptLine(
@@ -138,7 +178,9 @@ class PurchaseOrderViewSet(ApprovalViewSet):
                 material=order_line.material,
                 uom=order_line.uom,
                 quantity=quantity,
-                location_id=(source or {}).get("location") or order.supplier.default_receipt_location_id or order_line.material.default_location_id,
+                location_id=(source or {}).get("location")
+                or order.supplier.default_receipt_location_id
+                or order_line.material.default_location_id,
                 batch_number=(source or {}).get("batch_number", ""),
             )
             line.full_clean()
@@ -179,12 +221,22 @@ class PayableVoucherViewSet(ApprovalViewSet):
         return_line_ids = list(dict.fromkeys(request.data.get("purchase_return_line_ids") or []))
         if not receipt_line_ids and not return_line_ids:
             raise serializers.ValidationError("必须选择至少一条收货或采购退货明细")
-        receipt_lines = list(GoodsReceiptLine.objects.filter(pk__in=receipt_line_ids).select_related(
-            "receipt__supplier", "purchase_order_line__order__currency", "material", "uom",
-        ))
-        return_lines = list(PurchaseReturnLine.objects.filter(pk__in=return_line_ids).select_related(
-            "purchase_return__supplier", "purchase_order_line__order__currency", "material", "uom",
-        ))
+        receipt_lines = list(
+            GoodsReceiptLine.objects.filter(pk__in=receipt_line_ids).select_related(
+                "receipt__supplier",
+                "purchase_order_line__order__currency",
+                "material",
+                "uom",
+            )
+        )
+        return_lines = list(
+            PurchaseReturnLine.objects.filter(pk__in=return_line_ids).select_related(
+                "purchase_return__supplier",
+                "purchase_order_line__order__currency",
+                "material",
+                "uom",
+            )
+        )
         if len(receipt_lines) != len(receipt_line_ids):
             raise serializers.ValidationError({"receipt_line_ids": "包含不存在的收货明细"})
         if len(return_lines) != len(return_line_ids):
@@ -193,16 +245,22 @@ class PayableVoucherViewSet(ApprovalViewSet):
             line.purchase_return.status != ApprovalStatus.APPROVED for line in return_lines
         ):
             raise serializers.ValidationError("只有已审核收货或采购退货明细可以生成应付凭单")
-        used_receipts = set(PayableVoucherLine.objects.filter(
-            source_receipt_line_id__in=receipt_line_ids,
-        ).values_list("source_receipt_line_id", flat=True))
-        used_returns = set(PayableVoucherLine.objects.filter(
-            source_purchase_return_line_id__in=return_line_ids,
-        ).values_list("source_purchase_return_line_id", flat=True))
+        used_receipts = set(
+            PayableVoucherLine.objects.filter(
+                source_receipt_line_id__in=receipt_line_ids,
+            ).values_list("source_receipt_line_id", flat=True)
+        )
+        used_returns = set(
+            PayableVoucherLine.objects.filter(
+                source_purchase_return_line_id__in=return_line_ids,
+            ).values_list("source_purchase_return_line_id", flat=True)
+        )
         if used_receipts or used_returns:
-            raise serializers.ValidationError({
-                "sources": f"来源明细已生成凭单: 收货{sorted(used_receipts)} 退货{sorted(used_returns)}",
-            })
+            raise serializers.ValidationError(
+                {
+                    "sources": f"来源明细已生成凭单: 收货{sorted(used_receipts)} 退货{sorted(used_returns)}",
+                }
+            )
 
         groups = {}
         for line in receipt_lines:
@@ -263,9 +321,15 @@ class PurchaseRequisitionViewSet(ApprovalViewSet):
         if requisition.status != ApprovalStatus.APPROVED:
             raise serializers.ValidationError("只有已审核请购单可以转采购单")
         inquiry_ids = request.data.get("supplier_inquiry_ids") or []
-        inquiries = list(SupplierInquiry.objects.filter(pk__in=inquiry_ids, selected=True).select_related(
-            "supplier", "rfq_line__rfq", "rfq_line__requisition_line", "rfq_line__material", "rfq_line__uom",
-        ))
+        inquiries = list(
+            SupplierInquiry.objects.filter(pk__in=inquiry_ids, selected=True).select_related(
+                "supplier",
+                "rfq_line__rfq",
+                "rfq_line__requisition_line",
+                "rfq_line__material",
+                "rfq_line__uom",
+            )
+        )
         if len(inquiries) != len(set(inquiry_ids)) or not inquiries:
             raise serializers.ValidationError("必须选择有效且已选中的询价响应")
         if len({item.supplier_id for item in inquiries}) != 1:
@@ -300,7 +364,9 @@ class PurchaseRequisitionViewSet(ApprovalViewSet):
             source_line.save(update_fields=["converted_qty"])
         total_requested = sum((line.requested_qty for line in requisition.lines.all()), Decimal("0"))
         total_converted = sum((line.converted_qty for line in requisition.lines.all()), Decimal("0"))
-        requisition.conversion_percent = min(Decimal("100"), total_converted * Decimal("100") / total_requested) if total_requested else Decimal("0")
+        requisition.conversion_percent = (
+            min(Decimal("100"), total_converted * Decimal("100") / total_requested) if total_requested else Decimal("0")
+        )
         requisition.save(update_fields=["conversion_percent", "updated_at"])
         AuditEvent.objects.create(
             model=order._meta.label_lower,

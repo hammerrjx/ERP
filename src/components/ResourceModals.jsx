@@ -4,6 +4,7 @@ import { api, listPayload } from '../api/client'
 import { formatDateTime, labelFor, relatedLabel } from '../shared/presentation'
 import { field } from '../app/config'
 import { Field } from './Field'
+import { AsyncForm } from './PendingControls'
 
 const auditFields = [
   field('created_by', '录入人'),
@@ -74,7 +75,7 @@ export function RecordModal({ config: cfg, lookups, record, onClose, onSave }) {
     : cfg.fields.filter((item) => item.kind !== 'hidden')
   const save = (event) => {
     event.preventDefault()
-    onSave(
+    return onSave(
       activeTab?.id === 'contacts' || cfg.formTabs?.some((item) => item.id === 'contacts')
         ? { ...values, contacts: contacts.filter((contact) => contact.name.trim()) }
         : values
@@ -82,7 +83,7 @@ export function RecordModal({ config: cfg, lookups, record, onClose, onSave }) {
   }
   return (
     <div className="modal-backdrop">
-      <form className={`modal ${cfg.formTabs ? 'partner-modal' : ''}`} onSubmit={save}>
+      <AsyncForm className={`modal ${cfg.formTabs ? 'partner-modal' : ''}`} onSubmit={save}>
         <div className="modal-head">
           <div>
             <h2>
@@ -167,7 +168,7 @@ export function RecordModal({ config: cfg, lookups, record, onClose, onSave }) {
             保存
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }
@@ -265,12 +266,12 @@ export function ConversionModal({ kind, row, session, onClose, onSave }) {
     })
   const submit = (event) => {
     event.preventDefault()
-    onSave(kind === 'sales' ? values : { supplier_inquiry_ids: [...selected] })
+    return onSave(kind === 'sales' ? values : { supplier_inquiry_ids: [...selected] })
   }
   const title = kind === 'sales' ? '转销售订单' : '转采购单'
   return (
     <div className="modal-backdrop">
-      <form className="modal" onSubmit={submit}>
+      <AsyncForm className="modal" onSubmit={submit}>
         <div className="modal-head">
           <div>
             <h2>{title}</h2>
@@ -322,7 +323,7 @@ export function ConversionModal({ kind, row, session, onClose, onSave }) {
             {title}
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }
@@ -332,11 +333,11 @@ export function DocumentEvidenceModal({ row, evidenceType, onClose, onSave }) {
   const [notes, setNotes] = useState('')
   return (
     <div className="modal-backdrop">
-      <form
+      <AsyncForm
         className="modal"
         onSubmit={(event) => {
           event.preventDefault()
-          onSave({ file, notes })
+          return onSave({ file, notes })
         }}
       >
         <div className="modal-head">
@@ -374,7 +375,7 @@ export function DocumentEvidenceModal({ row, evidenceType, onClose, onSave }) {
             上传并确认
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }

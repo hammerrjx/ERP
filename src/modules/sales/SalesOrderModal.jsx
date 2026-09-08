@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   CalendarCheck,
   Check,
@@ -19,13 +19,14 @@ import {
   Settings,
   Trash2,
   Wrench,
-  X,
+  X
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { labelFor, today } from '../../shared/presentation'
-import { Field } from '../../components/Field'
+import { Field, SearchableLookup } from '../../components/Field'
 import { SalesOrderDetailModal } from './SalesOrderDetailModal'
 import { orderLineColumns, orderFieldByKey, orderGroups } from './salesOrderFields'
+import { AsyncForm, PendingButton } from '../../components/PendingControls'
 
 export function SalesOrderModal({ token, lookups, record, onClose, onSave, onDelete, onAction, readOnly = false }) {
   if (readOnly) return <SalesOrderDetailModal lookups={lookups} record={record} onClose={onClose} />
@@ -44,6 +45,9 @@ export function SalesOrderModal({ token, lookups, record, onClose, onSave, onDel
 
 function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, onAction }) {
   const [quoteError, setQuoteError] = useState('')
+  const quoteRequests = useRef(new Map())
+  const quoteContext = useRef('')
+  useEffect(() => () => quoteRequests.current.clear(), [])
   const [values, setValues] = useState({
     order_type: '1',
     tax_included: true,
@@ -51,7 +55,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
     delivery_mode: 'direct',
     exchange_rate: '1',
     version: 'A',
-    ...(record || {}),
+    ...(record || {})
   })
   const [lines, setLines] = useState(
     record?.lines || [
@@ -63,11 +67,12 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
         promised_date: values.promised_date || today(),
         copper_origin: '',
         copper_currency: '',
-        copper_price: 0,
-      },
+        copper_price: 0
+      }
     ]
   )
   const customers = lookups.customers || []
+  quoteContext.current = JSON.stringify([values.customer, values.currency, values.order_date])
   const materials = lookups.materials || []
   const customerMaterials = lookups.customerMaterials || []
   const addressOptions = customerAddressesFor(values.customer, lookups.customerAddresses)
@@ -75,7 +80,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
     ['1', '期货价'],
     ['2', '期目价'],
     ['3', '即日价'],
-    ['4', '议价'],
+    ['4', '议价']
   ]
   const update = (key, value) => {
     setQuoteError('')
@@ -93,7 +98,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
         tax_rate: selected?.tax_rate ?? 0,
         exchange_rate: selected?.exchange_rate || '1',
         address_code: '',
-        delivery_address: '',
+        delivery_address: ''
       }))
       setLines((current) =>
         current.map((line) => ({
@@ -103,7 +108,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
           quote_number: '',
           unit_price: '',
           discounted_unit_price: '',
-          untaxed_unit_price: '',
+          untaxed_unit_price: ''
         }))
       )
       return
@@ -115,25 +120,30 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
     }
     setValues((current) => ({ ...current, [key]: value }))
   }
-  const fetchQuote = async (index, line) => {
+  const fetchQuote = async (line) => {
     if (!values.customer || !line.material) return
+    const context = quoteContext.current
+    const request = Symbol()
+    quoteRequests.current.set(line, request)
+    const isCurrent = () => quoteRequests.current.get(line) === request && quoteContext.current === context
     setQuoteError('')
     const params = new URLSearchParams({
       customer: values.customer,
       material: line.material,
       customer_material: line.customer_material || '',
       currency: values.currency || '',
-      date: values.order_date || today(),
+      date: values.order_date || today()
     })
     try {
       const quote = await api(`/sales-quote/previous/?${params}`, { token })
+      if (!isCurrent()) return
       if (!quote.quote_line_id) {
         setQuoteError('未找到与当前客户、物料、客户料号、币种及订单日期匹配的有效报价')
         return
       }
       setLines((current) =>
-        current.map((row, rowIndex) =>
-          rowIndex === index && row.material === line.material && row.customer_material === line.customer_material
+        current.map((row) =>
+          row === line
             ? {
                 ...row,
                 source_quote_line: quote.quote_line_id || '',
@@ -144,13 +154,15 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
                 discounted_unit_price: quote.discounted_unit_price ?? '',
                 untaxed_unit_price: quote.untaxed_unit_price ?? '',
                 requested_date: quote.effective_date || row.requested_date,
-                expected_delivery_date: quote.promised_date || row.expected_delivery_date,
+                expected_delivery_date: quote.promised_date || row.expected_delivery_date
               }
             : row
         )
       )
     } catch (error) {
-      setQuoteError(`采用报价失败：${error.message}`)
+      if (isCurrent()) setQuoteError(`采用报价失败：${error.message}`)
+    } finally {
+      if (quoteRequests.current.get(line) === request) quoteRequests.current.delete(line)
     }
   }
   const updateLine = (index, key, value) => {
@@ -172,7 +184,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
         discounted_unit_price: '',
         untaxed_unit_price: '',
         material_name: materials.find((item) => item.id === Number(value))?.name || '',
-        material_specification: materials.find((item) => item.id === Number(value))?.specification || '',
+        material_specification: materials.find((item) => item.id === Number(value))?.specification || ''
       }
     }
     if (key === 'customer_material') {
@@ -186,7 +198,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
         price_type: '',
         discount_rate: 100,
         discounted_unit_price: '',
-        untaxed_unit_price: '',
+        untaxed_unit_price: ''
       }
     }
     setLines((currentLines) => currentLines.map((line, lineIndex) => (lineIndex === index ? next : line)))
@@ -244,7 +256,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
   }
   const save = (event) => {
     event.preventDefault()
-    onSave({
+    return onSave({
       ...values,
       lines: lines
         .filter((line) => line.material)
@@ -253,8 +265,8 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
           unit_price: line.unit_price === '' || line.unit_price == null ? '0' : line.unit_price,
           price_type: line.price_type || '1',
           line_number: line.line_number || (index + 1) * 10,
-          promised_date: line.promised_date || values.promised_date,
-        })),
+          promised_date: line.promised_date || values.promised_date
+        }))
     })
   }
   const deleteLine = () =>
@@ -270,8 +282,8 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
               promised_date: values.promised_date || today(),
               copper_origin: '',
               copper_currency: '',
-              copper_price: 0,
-            },
+              copper_price: 0
+            }
           ]
     )
   const renderOrderField = (key) => {
@@ -307,22 +319,23 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
     if (key === 'quote_choice')
       return (
         <td key={key}>
-          <button
+          <PendingButton
             type="button"
             title="采用有效报价"
             aria-label="采用有效报价"
             disabled={!line.material || !values.customer}
-            onClick={() => fetchQuote(index, line)}
+            onClick={() => fetchQuote(line)}
           >
             <Search size={15} />
-          </button>
+          </PendingButton>
           {line.quote_number || ''}
         </td>
       )
     if (key === 'material_code')
       return (
         <td key={key}>
-          <LineLookup
+          <SearchableLookup
+            className="line-lookup"
             label={label}
             value={line.material}
             options={materials}
@@ -339,7 +352,8 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
       )
       return (
         <td key={key}>
-          <LineLookup
+          <SearchableLookup
+            className="line-lookup"
             label={label}
             value={line.customer_material}
             options={options}
@@ -407,7 +421,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
   }
   return (
     <div className="modal-backdrop">
-      <form className="modal sales-order-modal" onSubmit={save}>
+      <AsyncForm className="modal sales-order-modal" onSubmit={save}>
         <div className="modal-head order-modal-head">
           <div>
             <div className="order-kicker">销售管理 / 客户订单</div>
@@ -493,8 +507,8 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
                     promised_date: values.promised_date || today(),
                     copper_origin: '',
                     copper_currency: '',
-                    copper_price: 0,
-                  },
+                    copper_price: 0
+                  }
                 ])
               }
             >
@@ -545,7 +559,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
             保存草稿
           </button>
         </div>
-      </form>
+      </AsyncForm>
     </div>
   )
 }
@@ -556,10 +570,10 @@ function customerAddressesFor(customer, addresses = []) {
 
 function OrderToolbar({ record, onAction, onDelete, onDeleteLine, onClose }) {
   const run = (action) => {
-    if (record?.id && onAction) onAction(action)
+    if (record?.id && onAction) return onAction(action)
   }
   const command = (label, icon, action, disabled = false) => (
-    <button
+    <PendingButton
       type="button"
       className="order-command"
       title={label}
@@ -568,7 +582,7 @@ function OrderToolbar({ record, onAction, onDelete, onDeleteLine, onClose }) {
     >
       {icon}
       <span>{label}</span>
-    </button>
+    </PendingButton>
   )
   return (
     <div className="order-command-bar">
@@ -628,71 +642,5 @@ function OrderToolbar({ record, onAction, onDelete, onDeleteLine, onClose }) {
         <span>关闭</span>
       </button>
     </div>
-  )
-}
-
-function LineLookup({ label, value, options, customerMaterial = false, onChange }) {
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
-  const selected = options.find((option) => option.id === Number(value))
-  const code = (option) =>
-    customerMaterial ? option.customer_code || option.code || option.material_code : option.code || option.material_code
-  const text = (option) =>
-    [
-      code(option),
-      option.name,
-      option.customer_name,
-      option.material_name,
-      option.specification,
-      option.material_specification,
-    ]
-      .filter(Boolean)
-      .join(' ')
-  const visible = options
-    .filter((option) => text(option).toLowerCase().includes(query.trim().toLowerCase()))
-    .slice(0, 30)
-  return (
-    <label className={`lookup-field line-lookup ${customerMaterial ? 'customer-material-lookup' : ''}`}>
-      <span>{label}</span>
-      <input
-        value={query || (selected ? code(selected) : '')}
-        placeholder="输入代码或名称检索"
-        onFocus={() => setOpen(true)}
-        onChange={(event) => {
-          setQuery(event.target.value)
-          setOpen(true)
-        }}
-        onBlur={() =>
-          setTimeout(() => {
-            setQuery('')
-            setOpen(false)
-          }, 150)
-        }
-      />
-      {open ? (
-        <div className="lookup-menu">
-          {visible.map((option) => (
-            <button
-              type="button"
-              key={option.id}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                onChange(option.id)
-                setQuery('')
-                setOpen(false)
-              }}
-            >
-              <strong>{code(option)}</strong>
-              <span>
-                {[option.name || option.customer_name || option.material_name, option.material_code]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </span>
-            </button>
-          ))}
-          {visible.length === 0 ? <div className="lookup-empty">无匹配项</div> : null}
-        </div>
-      ) : null}
-    </label>
   )
 }

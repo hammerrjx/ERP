@@ -1,58 +1,36 @@
-# Backend architecture
+# 架构与业务约束
 
-The backend is a small Django/DRF service. It borrows Odoo's useful boundaries
-without copying Odoo's implementation:
+## 数据与模块边界
 
-- `Company`, `Currency`, `CurrencyRate`, `UomCategory`, `Uom`, `ProductCategory`,
-  and `Location` are reusable master data.
-- `Material` keeps the four form tabs from the legacy ERP: basic, engineering,
-  inventory, and MRP. Foreign keys connect category, UoM, default location,
-  supplier, and companies.
-- `Partner` is the shared customer/supplier record. Contacts and bank accounts
-  are one-to-many records; `PartnerCompany` is the multi-company bridge.
-- `CustomerMaterial` stores the customer's external material code/name.
-- `SupplierQuote` and `SupplierQuoteLine` model dated purchase/outsource quotes.
-- `PayableVoucher` and `PayableVoucherLine` map the legacy `ap_mstr` / `apd_det`
-  header-source relationship. Approved receipts add payable amounts and approved
-  purchase returns subtract them; a source line can be used only once.
-- `AuditedModel` provides a server-side approval state machine. `AuditEvent` is
-  append-only application audit data.
+- 应用使用 Django 的 `backend` app；模型分文件不改变 app label、数据库表名、外键和已提交迁移。
+- 默认运行库为本地 SQLite，配置 `ERP_DB_NAME` 等进程环境变量后使用 PostgreSQL。生产部署方案尚未在此项目中定版。
+- `dgyzx1` 是旧 ERP 数据关系参考库，源库查询保持只读；旧系统状态和权限不自动等同于新系统规则。
+- 模型负责数据关联及数量约束，序列化负责输入形状和保存事务，视图负责 HTTP 操作及现有权限检查。Django `save()` 不自动调用 `full_clean()`，导入命令必须显式执行其所需校验。
+- 前端业务组件通过 `src/api` 访问后端；共用控件不拥有业务规则。请求缓存和列表加载属于 `src/app`。
+- `backend/delivery.py` 实现送货单保存、数量占用及执行汇总；`backend/domain/delivery.py` 定义送货与退货模型。
+- 工程模型维护 BOM、工艺路线；采购模型维护报价、采购和收退货，应付模型位于 `backend/domain/finance.py`。
 
-PostgreSQL is the production database. SQLite is acceptable for local smoke
-tests. CRUD stays synchronous; background jobs are intentionally deferred until
-imports, notifications, or MRP planning have a measured need.
+## 已确认的销售与送货规则
 
-## Invariants enforced by the model layer
+- 正式数量 950、备品计划 50 时，总数量为 1000；金额只按正式数量计算，备品不计金额。
+- 备品必须先有客户订单计划。正式送货和备品送货可填写在同一订单行，并按订单及行号准确关联。
+- 送货单审核生效时更新累计执行，重复操作不能重复累计；回单确认不再次累计。
+- 退回冲减净已送数量，释放补送额度；未审核送货的占用参与超计划校验。
+- 已有送货引用的订单行不能删除或改变来源身份。订单头修改必须重新校验已有明细的客户、报价和币种关联。
+- 手工订单行与报价转单使用模型中的同一报价关联及有效期校验。
+- 库存过账由 `ERP_DELIVERY_POST_STOCK` 控制，默认关闭。
 
-- Protected foreign keys prevent deleting referenced master data.
-- Unit conversions must use the same UoM category and positive quantities.
-- Material and partner company scope is explicit through bridge tables.
-- Supplier quotes require approved supplier roles, valid dates, and exactly the
-  price kind implied by purchase vs. outsource quote type.
-- Approval transitions are server-side and reject invalid transitions.
-- Payable generation separates supplier, currency, payment method, and tax rate;
-  mixed payment methods can never share one automatically generated voucher.
-- Material default location, category, UoM, and tax code are required fields.
+## 其他现有规则与待确认项
 
-## Code organization
+- 外键保护已被引用的基础资料；单位转换要求同一单位类别及正数比例。
+- 应付凭单来源为已审核收货或采购退货，按供应商、币种、支付方式和税率拆分；退货负额冲减，同一来源行不能重复入账。
+- 非生产收货不增加库存；现有 FG01 无订单销售退货规则要求进入 RMA 仓。它们是当前代码行为，后续业务调整需单独确认。
+- 当前已有服务端角色与审批代码，但最终账号权限、多级审批和业务边界尚待设计。报价转换的目标订单创建权限是已记录的待确认边界，不将其当作已通过验收的规则。
 
-- `backend/domain/` owns model implementations by business module: shared audit
-  behavior in `base.py`, then master data, system, engineering, sales, delivery,
-  purchase, and inventory. `backend/models.py` exposes the existing model names
-  for Django discovery and established imports. Cross-module relations use
-  Django string references; table names and the `backend` app label stay stable.
-- `backend/master_data/serializers/` groups validation and API representations
-  by the same modules, with separate sales quote and order serializers. Its
-  `__init__.py` preserves the existing serializer import paths. `common.py`
-  owns only shared model validation and the generic serializer factory.
-- HTTP endpoints are organized in `backend/master_data/*_views.py` by system,
-  master data, engineering, sales, purchasing, and inventory. The established
-  `backend/master_data/views.py` remains a compatibility export for the router;
-  API paths and permission resource names remain unchanged.
-- `backend/master_data/api_common.py` owns the shared role permission check,
-  audited create/update hooks, approval actions, and generic model ViewSet
-  factory. Domain ViewSets use this shared behavior rather than duplicating it.
+## 浏览器验收
 
-`makemigrations` should be run after installing the requirements. The API uses
-the same model validation for browser forms and imports; frontend controls are
-not treated as a security boundary.
+`tools/check_quote_order_lookup.cjs` 使用本地只读快照拦截 API，检查报价与订单物料检索。快照由 `tools/audit_quote_order_chain.py` 生成，需要本地存在目标诊断订单。
+`tools/spare_browser_server.py` 创建隔离测试库，`tools/check_spare_browser.cjs` 对其执行送货及备品浏览器回归。
+运行前启动 Vite；脚本通过 `ERP_FRONTEND_URL`、`ERP_TEST_API_URL` 指定地址，默认端口分别为 5175 和 8013。
+Playwright 通过 `PLAYWRIGHT_MODULE` 指向已安装的模块，或使用 Node 可解析的 `playwright`。测试不会要求个人电脑上的固定目录。
+`tools/probe_quote_order_boundaries.py` 是显式运行的边界诊断，其中权限探针记录未完成的权限决策。

@@ -1,11 +1,55 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.utils import timezone
 from rest_framework import serializers
 
 from backend.models import Partner, SalesOrder, SalesOrderLine
 
 from .common import BaseSerializer
+
+
+SALES_ORDER_LINE_READ_ONLY_FIELDS = (
+    "delivered_quantity",
+    "customer_material_name",
+    "customer_material_specification",
+    "terminal_customer_code",
+    "terminal_customer_name",
+    "material_name",
+    "material_specification",
+    "tax_code",
+    "tax_name",
+    "invoice_name",
+    "inventory_uom",
+    "uom_rate_m",
+    "uom_rate_d",
+    "spare_ratio",
+    "delivered_spare_quantity",
+    "returned_quantity",
+    "returned_spare_quantity",
+    "discount_rate",
+    "discounted_unit_price",
+    "untaxed_unit_price",
+    "tax_included_amount",
+    "untaxed_amount",
+    "total_cost",
+    "after_sales_method",
+    "after_sales_method_name",
+    "line_status",
+    "closed_by",
+    "closed_at",
+    "income_account",
+    "income_account_name",
+    "replenishment_return",
+    "products_per_carton",
+    "cartons",
+    "configuration_approved",
+    "configuration_approved_by",
+    "configuration_approved_at",
+    "created_by",
+    "created_at",
+    "updated_by",
+    "updated_at",
+    "modification_count",
+)
 
 
 def clean_sales_order(instance):
@@ -26,50 +70,7 @@ class SalesOrderLineInputSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalesOrderLine
         fields = "__all__"
-        read_only_fields = (
-            "order",
-            "delivered_quantity",
-            "customer_material_name",
-            "customer_material_specification",
-            "terminal_customer_code",
-            "terminal_customer_name",
-            "material_name",
-            "material_specification",
-            "tax_code",
-            "tax_name",
-            "invoice_name",
-            "inventory_uom",
-            "uom_rate_m",
-            "uom_rate_d",
-            "spare_ratio",
-            "delivered_spare_quantity",
-            "returned_quantity",
-            "returned_spare_quantity",
-            "discount_rate",
-            "discounted_unit_price",
-            "untaxed_unit_price",
-            "tax_included_amount",
-            "untaxed_amount",
-            "total_cost",
-            "after_sales_method",
-            "after_sales_method_name",
-            "line_status",
-            "closed_by",
-            "closed_at",
-            "income_account",
-            "income_account_name",
-            "replenishment_return",
-            "products_per_carton",
-            "cartons",
-            "configuration_approved",
-            "configuration_approved_by",
-            "configuration_approved_at",
-            "created_by",
-            "created_at",
-            "updated_by",
-            "updated_at",
-            "modification_count",
-        )
+        read_only_fields = ("order",) + SALES_ORDER_LINE_READ_ONLY_FIELDS
         extra_kwargs = {
             "line_number": {"required": False},
             "customer_material": {"required": False},
@@ -140,41 +141,6 @@ class SalesOrderSerializer(BaseSerializer):
         if lines is not None:
             if not lines:
                 raise serializers.ValidationError({"lines": "客户订单至少需要一条明细"})
-            for index, line in enumerate(lines, 1):
-                if not line.get("line_number"):
-                    line["line_number"] = index * 10
-                customer_material = line.get("customer_material")
-                if customer_material and (
-                    customer_material.customer_id != customer.id
-                    or customer_material.material_id != line["material"].id
-                    or not customer_material.enabled
-                ):
-                    raise serializers.ValidationError(
-                        {"lines": [{"customer_material": "客户物料与客户/物料不匹配或已停用"}]}
-                    )
-                source_quote_line = line.get("source_quote_line")
-                if source_quote_line:
-                    if (
-                        source_quote_line.quote.customer_id != customer.id
-                        or source_quote_line.material_id != line["material"].id
-                        or not source_quote_line.quote.is_ratified
-                    ):
-                        raise serializers.ValidationError(
-                            {"lines": [{"source_quote_line": "来源销售报价与订单客户、物料不匹配或未核准"}]}
-                        )
-                    quote = source_quote_line.quote
-                    order_currency = attrs.get("currency") or getattr(self.instance, "currency", None)
-                    order_date = (
-                        attrs.get("order_date") or getattr(self.instance, "order_date", None) or timezone.localdate()
-                    )
-                    if quote.currency_id != order_currency.id:
-                        raise serializers.ValidationError(
-                            {"lines": [{"source_quote_line": "来源销售报价币种与订单币种不一致"}]}
-                        )
-                    if quote.effective_date > order_date or (quote.expiry_date and quote.expiry_date < order_date):
-                        raise serializers.ValidationError(
-                            {"lines": [{"source_quote_line": "来源销售报价在订单日期无效"}]}
-                        )
         return attrs
 
     @transaction.atomic
@@ -198,6 +164,10 @@ class SalesOrderSerializer(BaseSerializer):
             setattr(instance, name, value)
         clean_sales_order(instance)
         instance.save()
+        if lines is None and {"customer", "currency", "order_date"} & validated_data.keys():
+            for line in instance.lines.select_related("customer_material", "source_quote_line__quote"):
+                line.order = instance
+                clean_sales_order(line)
         if lines is not None:
             self._replace_lines(instance, lines)
             self._sync_source_quote(instance)
@@ -294,48 +264,7 @@ class SalesOrderLineSerializer(serializers.ModelSerializer):
             "executed_negative_quantity",
             "net_executed_quantity",
             "remaining_quantity",
-            "delivered_quantity",
-            "customer_material_name",
-            "customer_material_specification",
-            "terminal_customer_code",
-            "terminal_customer_name",
-            "material_name",
-            "material_specification",
-            "tax_code",
-            "tax_name",
-            "invoice_name",
-            "inventory_uom",
-            "uom_rate_m",
-            "uom_rate_d",
-            "spare_ratio",
-            "delivered_spare_quantity",
-            "returned_quantity",
-            "returned_spare_quantity",
-            "discount_rate",
-            "discounted_unit_price",
-            "untaxed_unit_price",
-            "tax_included_amount",
-            "untaxed_amount",
-            "total_cost",
-            "after_sales_method",
-            "after_sales_method_name",
-            "line_status",
-            "closed_by",
-            "closed_at",
-            "income_account",
-            "income_account_name",
-            "replenishment_return",
-            "products_per_carton",
-            "cartons",
-            "configuration_approved",
-            "configuration_approved_by",
-            "configuration_approved_at",
-            "created_by",
-            "created_at",
-            "updated_by",
-            "updated_at",
-            "modification_count",
-        )
+        ) + SALES_ORDER_LINE_READ_ONLY_FIELDS
         extra_kwargs = {
             "line_number": {"required": False},
             "customer_material": {"required": False},
@@ -381,36 +310,6 @@ class SalesOrderLineSerializer(serializers.ModelSerializer):
 
     def get_remaining_quantity(self, obj):
         return max(obj.quantity - obj.delivered_quantity, 0)
-
-    def validate(self, attrs):
-        order = attrs.get("order") or getattr(self.instance, "order", None)
-        material = attrs.get("material") or getattr(self.instance, "material", None)
-        customer_material = attrs.get("customer_material") or getattr(self.instance, "customer_material", None)
-        source_quote_line = attrs.get("source_quote_line", getattr(self.instance, "source_quote_line", None))
-        if (
-            order
-            and customer_material
-            and (
-                customer_material.customer_id != order.customer_id
-                or customer_material.material_id != material.id
-                or not customer_material.enabled
-            )
-        ):
-            raise serializers.ValidationError({"customer_material": "客户物料与客户/物料不匹配或已停用"})
-        if source_quote_line:
-            if (
-                source_quote_line.quote.customer_id != order.customer_id
-                or source_quote_line.material_id != material.id
-                or not source_quote_line.quote.is_ratified
-            ):
-                raise serializers.ValidationError({"source_quote_line": "来源销售报价与订单客户、物料不匹配或未核准"})
-            if source_quote_line.quote.currency_id != order.currency_id:
-                raise serializers.ValidationError({"source_quote_line": "来源销售报价币种与订单币种不一致"})
-            if source_quote_line.quote.effective_date > order.order_date or (
-                source_quote_line.quote.expiry_date and source_quote_line.quote.expiry_date < order.order_date
-            ):
-                raise serializers.ValidationError({"source_quote_line": "来源销售报价在订单日期无效"})
-        return attrs
 
     def create(self, validated_data):
         line = SalesOrderLine(**validated_data)

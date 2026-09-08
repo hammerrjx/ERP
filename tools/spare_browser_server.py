@@ -5,6 +5,7 @@ import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "backend")]
@@ -12,6 +13,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "erp_backend.settings")
 import django
 from django.conf import settings
 
+(ROOT / "tmp").mkdir(exist_ok=True)
 settings.DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3",
     "NAME": ROOT / "tmp" / f"spare-browser-{uuid.uuid4().hex}.sqlite3",
     "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20}}}
@@ -45,4 +47,7 @@ with patch("backend.material_codes._source_codes", return_value=None):
         seed.approve("sales-order", order["id"])
     Token.objects.create(user=seed.user, key="spare-isolated-browser-test-token")
 print("Isolated spare acceptance server ready", flush=True)
-call_command("runserver", "127.0.0.1:8013", use_reloader=False)
+test_url = urlparse(os.getenv("ERP_TEST_API_URL", "http://127.0.0.1:8013"))
+if test_url.hostname not in {"127.0.0.1", "localhost"}:
+    raise SystemExit("The acceptance server must run on localhost")
+call_command("runserver", f"{test_url.hostname}:{test_url.port or 8013}", use_reloader=False)
