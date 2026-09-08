@@ -7,9 +7,9 @@ from django.utils import timezone
 from rest_framework import decorators, response, serializers
 
 from backend.domain.sales import (
-    CustomerMaterial, DeliveryOrder, DeliveryOrderLine, SalesOrder, SalesOrderLine,
-    SalesQuote, SalesQuoteLine, SalesReturn, SalesReturnLine,
+    CustomerMaterial, SalesOrder, SalesOrderLine, SalesQuote, SalesQuoteLine,
 )
+from backend.domain.delivery import DeliveryOrder, DeliveryOrderLine, SalesReturn, SalesReturnLine
 from backend.domain.system import ApprovalStatus, AuditEvent
 from .api_common import ApprovalViewSet, ensure_editable, ensure_status_unchanged, make_viewset
 from .serializers import (
@@ -18,7 +18,7 @@ from .serializers import (
     SalesQuoteSerializer, SalesReturnLineSerializer, SalesReturnSerializer,
 )
 from backend.models import (
-    CustomerAddress, Department, PurchaseOrder, PurchaseOrderLine, PurchaseRequisition,
+    Department, PurchaseOrder, PurchaseOrderLine, PurchaseRequisition,
     PurchaseRequisitionLine, StockBalance,
 )
 from .serializers import PurchaseRequisitionSerializer
@@ -154,7 +154,7 @@ class SalesOrderViewSet(ApprovalViewSet):
                 line_number=line.line_number,
                 material=line.material,
                 uom=line.uom,
-                mrp_demand_qty=demand,
+                mrp_demand_qty=demand.normalize(),
                 on_order_qty=on_order,
                 available_qty=available,
                 safety_stock_qty=safety_stock,
@@ -177,151 +177,236 @@ class DeliveryOrderViewSet(ApprovalViewSet):
     queryset = DeliveryOrder.objects.select_related("customer", "sales_order", "source_location").prefetch_related(
         "lines__sales_order_line__order__currency", "lines__sales_order_line__inventory_uom",
         "lines__sales_order_line__customer_material", "lines__material", "lines__uom", "lines__source_location",
+        "lines__sales_order_line__material__default_location", "lines__sales_order_line__material__uom", "lines__sales_order_line__uom",
     )
     serializer_class = DeliveryOrderSerializer
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        from backend.models import DeliveryNumberReservation
+        instance = DeliveryOrder.objects.select_for_update().get(pk=self.get_object().pk)
+        ensure_editable(instance)
+        if DeliveryNumberReservation.objects.filter(delivery=instance).exists():
+            raise serializers.ValidationError("已取号的送货单请作废，保留单号记录")
+        return super().destroy(request, *args, **kwargs)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        from backend.delivery import validate_quantities
+        obj = DeliveryOrder.objects.select_for_update().get(pk=serializer.instance.pk)
+        if obj.posted:
+            raise serializers.ValidationError("已回写订单的单据不能修改")
+        super().perform_update(serializer)
+        try:
+            validate_quantities(serializer.instance, list(serializer.instance.lines.select_related("sales_order_line__order")))
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages)
 
     def get_serializer_class(self):
         return DeliveryOrderDetailSerializer if self.action == "retrieve" else DeliveryOrderSerializer
 
+    @decorators.action(detail=False, methods=["post"], url_path="reserve-number")
+    @transaction.atomic
+    def reserve_number(self, request):
+        from backend.models import DeliveryNumberReservation, DeliveryOrderSequence
+        key = serializers.UUIDField().run_validation(request.data.get("request_id"))
+        day = serializers.DateField().run_validation(request.data.get("delivery_date"))
+        existing = DeliveryNumberReservation.objects.select_for_update().filter(pk=key).first()
+        if existing:
+            if existing.owner_id != request.user.pk:
+                raise serializers.ValidationError("取号请求不属于当前用户")
+            return response.Response({"reservation": str(existing.pk), "number": existing.number})
+        try:
+            number = DeliveryOrderSequence.next_number(day)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages)
+        reserved = DeliveryNumberReservation.objects.create(id=key, number=number, delivery_date=day, owner=request.user)
+        return response.Response({"reservation": str(reserved.pk), "number": number}, status=201)
+
+    @decorators.action(detail=False, methods=["get"], url_path="order-candidates")
+    def order_candidates(self, request):
+        from backend.delivery import SOURCE_RELATED, commitments, order_line_data
+        customer = serializers.IntegerField(min_value=1).run_validation(request.query_params.get("customer"))
+        page = serializers.IntegerField(min_value=1).run_validation(request.query_params.get("page", 1))
+        queryset = SalesOrderLine.objects.filter(order__customer_id=customer, order__status=ApprovalStatus.APPROVED).filter(
+            Q(line_status__in=("normal", ""))
+            | (Q(line_status__in=("C", "closed")) & (Q(delivered_quantity__gt=0) | Q(delivered_spare_quantity__gt=0)))
+        )
+        fields = {"customer_po": "order__customer_po", "material_code": "material__code",
+                  "customer_material_code": "customer_material__customer_code",
+                  "terminal_material_code": "customer_material__terminal_customer_code",
+                  "order_number": "order__number"}
+        mode = request.query_params.get("match", "contains")
+        if mode not in ("contains", "exact", "range"):
+            raise serializers.ValidationError("查询方式无效")
+        for key, field in fields.items():
+            value, upper = request.query_params.get(key, "").strip(), request.query_params.get(key + "_to", "").strip()
+            if value:
+                queryset = queryset.filter(**{field + ("__icontains" if mode == "contains" else "__iexact" if mode == "exact" else "__gte"): value})
+            if upper and mode == "range":
+                queryset = queryset.filter(**{field + "__lte": upper})
+        for key, field in (("order_date", "order__order_date"), ("promised_date", "promised_date")):
+            for suffix, lookup in (("_from", "__gte"), ("_to", "__lte")):
+                raw = request.query_params.get(key + suffix)
+                if raw:
+                    queryset = queryset.filter(**{field + lookup: serializers.DateField().run_validation(raw)})
+        exclude = request.query_params.get("delivery")
+        if exclude:
+            exclude = serializers.IntegerField(min_value=1).run_validation(exclude)
+            if not DeliveryOrder.objects.filter(pk=exclude, customer_id=customer).exists():
+                raise serializers.ValidationError("送货单与查询客户不一致")
+        count = queryset.count()
+        rows = list(queryset.select_related(*SOURCE_RELATED).order_by("-order__order_date", "-order_id", "line_number")[(page - 1) * 30:page * 30])
+        occupied = commitments([row.pk for row in rows], exclude)
+        return response.Response({"count": count, "page": page, "page_size": 30,
+                                  "results": [order_line_data(row, occupied[row.pk]) for row in rows]})
+
+    @decorators.action(detail=False, methods=["post"], url_path="save-sheet")
+    @transaction.atomic
+    def save_sheet(self, request):
+        from backend.delivery import save_sheet
+        from backend.models import DeliveryNumberReservation
+        key = serializers.UUIDField().run_validation(request.data.get("reservation"))
+        reservation = DeliveryNumberReservation.objects.select_for_update().filter(pk=key, owner=request.user).first()
+        if not reservation:
+            raise serializers.ValidationError("请先取得正式单号")
+        if reservation.delivery_id:
+            return response.Response(DeliveryOrderDetailSerializer(reservation.delivery).data)
+        saved = save_sheet(request.data, request.user, reservation=reservation)
+        return response.Response(DeliveryOrderDetailSerializer(saved).data, status=201)
+
+    @decorators.action(detail=True, methods=["post"], url_path="save-sheet")
+    @transaction.atomic
+    def update_sheet(self, request, pk=None):
+        from backend.delivery import save_sheet
+        instance = DeliveryOrder.objects.select_for_update().get(pk=self.get_object().pk)
+        saved = save_sheet(request.data, request.user, instance=instance)
+        return response.Response(DeliveryOrderDetailSerializer(saved).data)
+
+    @transaction.atomic
+    def transition(self, obj, action, actor="", reason=""):
+        obj = DeliveryOrder.objects.select_for_update().get(pk=obj.pk)
+        if action == "approve" and obj.status == ApprovalStatus.APPROVED:
+            return response.Response(self.get_serializer(obj).data)
+        return super().transition(obj, action, actor, reason)
+
     @decorators.action(detail=False, methods=["post"], url_path="generate-from-order")
     @transaction.atomic
     def generate_from_order(self, request):
-        order = SalesOrder.objects.filter(pk=request.data.get('sales_order')).first()
-        selected = request.data.get("lines")
-        if selected is not None and not isinstance(selected, list):
-            raise serializers.ValidationError({"lines": "送货明细必须是列表"})
-        selected_ids = set()
-        for item in (selected or []):
-            raw_line_id = item.get("sales_order_line")
-            if not raw_line_id:
-                continue
-            try:
-                selected_ids.add(int(raw_line_id))
-            except (TypeError, ValueError):
-                raise serializers.ValidationError({"lines": f"销售订单明细编号无效: {raw_line_id}"})
-        source_lines = SalesOrderLine.objects.select_related("order__customer", "material", "uom", "customer_material").filter(pk__in=selected_ids) if selected is not None else (order.lines.select_related("order__customer", "material", "uom", "customer_material") if order else SalesOrderLine.objects.none())
-        source_lines = list(source_lines)
-        if not source_lines:
-            raise serializers.ValidationError('请选择至少一条销售订单明细')
-        orders = {line.order_id: line.order for line in source_lines}
-        if order and any(line.order_id != order.id for line in source_lines):
-            raise serializers.ValidationError('送货明细不能包含未选择销售订单的行')
-        if any(item.status != ApprovalStatus.APPROVED for item in orders.values()):
-            raise serializers.ValidationError('只有已审核销售订单可以生成送货草稿')
-        customer_ids = {item.customer_id for item in orders.values()}
-        if len(customer_ids) != 1:
-            raise serializers.ValidationError('一张送货单只能包含同一客户的销售订单')
-        order = order or next(iter(orders.values()))
-        customer_id = request.data.get('customer')
-        if customer_id and int(customer_id) != order.customer_id:
-            raise serializers.ValidationError({'customer': '送货客户必须与销售订单一致'})
-        customer_po = request.data.get('customer_po') or order.customer_po
-        if customer_po != order.customer_po:
-            raise serializers.ValidationError({'customer_po': '客户 PO 必须与销售订单一致'})
-        address_code = request.data.get('address_code') or ''
-        address = CustomerAddress.objects.filter(customer_id=order.customer_id, code=address_code, enabled=True).first() if address_code else None
-        delivery_address = (address.address if address else request.data.get('delivery_address')) or order.delivery_address or ''
-        source_location_id = request.data.get('source_location') or next((item.material.default_location_id for item in source_lines if item.material.default_location_id), None)
-        if not source_location_id:
-            raise serializers.ValidationError({'source_location': '出库库位必填，且物料必须配置默认库位'})
-        delivery_mode = request.data.get('delivery_mode') or order.delivery_mode
-        if delivery_mode not in {SalesOrder.DeliveryMode.DIRECT, SalesOrder.DeliveryMode.SUPPLIER}:
-            raise serializers.ValidationError({'delivery_mode': '送货模式不合法'})
-        delivery = DeliveryOrder(
-            customer=order.customer, sales_order=order if len(orders) == 1 else None,
-            delivery_address=delivery_address,
-            address_code=address_code,
-            address_snapshot=request.data.get('address_snapshot', delivery_address),
-            document_type=request.data.get('document_type', DeliveryOrder.DocumentType.NORMAL),
-            delivery_mode=delivery_mode,
-            source_location_id=source_location_id,
-            srm_number=request.data.get('srm_number') or order.srm_number or '', customer_po=customer_po,
-            delivery_date=request.data.get('delivery_date') or timezone.localdate(),
-            notes=request.data.get('notes', ''), created_by=request.user.get_username(),
-        )
-        try:
-            delivery.full_clean()
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(getattr(exc, 'message_dict', exc.messages)) from exc
-        delivery.save()
-        created = 0
-        requested_lines = {}
-        for item in (selected or []):
-            raw_line_id = item.get("sales_order_line")
-            if not raw_line_id:
-                continue
-            try:
-                line_id = int(raw_line_id)
-            except (TypeError, ValueError):
-                raise serializers.ValidationError({"lines": f"销售订单明细编号无效: {raw_line_id}"})
-            requested_lines[line_id] = item
-        if selected is not None and len(requested_lines) != len(selected):
-            raise serializers.ValidationError({"lines": "每条送货明细必须且只能选择一个销售订单行"})
-        found_line_ids = set()
-        iterable_lines = source_lines if selected is not None else order.lines.select_related('material', 'uom', 'customer_material')
-        for order_line in iterable_lines:
-            source = requested_lines.get(order_line.pk)
-            if selected is not None and source is None:
-                continue
-            found_line_ids.add(order_line.pk)
-            quantity = Decimal(str(source.get("actual_quantity"))) if source and source.get("actual_quantity") is not None else order_line.quantity - order_line.delivered_quantity
-            if delivery.document_type in {DeliveryOrder.DocumentType.RETURN, DeliveryOrder.DocumentType.RED_FLUSH}:
-                quantity = abs(quantity)
-            if quantity == 0 or (delivery.document_type == DeliveryOrder.DocumentType.NORMAL and quantity < 0):
-                continue
-            delivery_line = DeliveryOrderLine(
-                delivery=delivery, line_number=order_line.line_number,
-                sales_order_line=order_line, material=order_line.material,
-                customer_material=order_line.customer_material, uom=order_line.uom,
-                actual_quantity=quantity,
-                ordered_spare_quantity=order_line.spare_quantity if hasattr(order_line, 'spare_quantity') else 0,
-                actual_spare_quantity=Decimal(str(source.get('actual_spare_quantity', 0))) if source else Decimal('0'),
-                source_location_id=(source or {}).get("source_location") or source_location_id or order_line.material.default_location_id,
-                batch_number=(source or {}).get("batch_number", ""),
-                srm_customer_po=order_line.order.customer_po,
-                srm_material_code=(order_line.customer_material.customer_code if order_line.customer_material else order_line.material.code),
-                srm_material_name=order_line.material.name,
-                srm_quantity=quantity if delivery.document_type == DeliveryOrder.DocumentType.NORMAL else -quantity,
-            )
-            try:
-                delivery_line.full_clean()
-            except DjangoValidationError as exc:
-                raise serializers.ValidationError(getattr(exc, 'message_dict', exc.messages)) from exc
-            delivery_line.save()
-            created += 1
-        unknown_lines = set(requested_lines).difference(found_line_ids)
-        if unknown_lines:
-            raise serializers.ValidationError({"lines": f"销售订单不包含来源行: {sorted(unknown_lines)}"})
-        if not created:
-            delivery.delete()
-            raise serializers.ValidationError('销售订单没有待送货明细')
-        AuditEvent.objects.create(
-            model=delivery._meta.label_lower,
-            object_id=str(delivery.pk),
-            action="generate_from_order",
-            actor=request.user.get_username() or "system",
-            payload={
-                "document_type": delivery.document_type,
-                "sales_order_ids": sorted(orders),
-                "sales_order_numbers": sorted(item.number for item in orders.values()),
-                "sales_order_line_ids": sorted(found_line_ids),
-                "sales_order_lines": sorted(
-                    f"{line.order.number}/{line.line_number}" for line in source_lines if line.pk in found_line_ids
-                ),
-            },
-        )
-        return response.Response(DeliveryOrderSerializer(delivery).data, status=201)
+        from backend.delivery import commitments, save_sheet
+        data = dict(request.data)
+        if "lines" not in data:
+            order_id = serializers.IntegerField(min_value=1).run_validation(data.get("sales_order"))
+            order = SalesOrder.objects.filter(pk=order_id).first()
+            if not order:
+                raise serializers.ValidationError("客户订单不存在")
+            rows = list(order.lines.all())
+            occupied = commitments([row.pk for row in rows])
+            data["lines"] = [{"sales_order_line": row.pk,
+                              "actual_quantity": str(max(row.quantity - row.delivered_quantity - occupied[row.pk][0], 0)),
+                              "actual_spare_quantity": str(max(row.spare_quantity - row.delivered_spare_quantity - occupied[row.pk][2], 0))}
+                             for row in rows if row.quantity - row.delivered_quantity - occupied[row.pk][0] > 0
+                             or row.spare_quantity - row.delivered_spare_quantity - occupied[row.pk][2] > 0]
+            data.setdefault("delivery_address", order.delivery_address)
+        saved = save_sheet(data, request.user)
+        return response.Response(DeliveryOrderDetailSerializer(saved).data, status=201)
 
-
-DeliveryOrderLineViewSet = make_viewset(DeliveryOrderLine, DeliveryOrderLineSerializer)
-DeliveryOrderLineViewSet.queryset = DeliveryOrderLine.objects.select_related(
+_DeliveryOrderLineBase = make_viewset(DeliveryOrderLine, DeliveryOrderLineSerializer)
+_DeliveryOrderLineBase.queryset = DeliveryOrderLine.objects.select_related(
     "delivery", "sales_order_line__order", "sales_order_line__order__currency",
     "sales_order_line__customer_material", "sales_order_line__material",
     "sales_order_line__uom", "sales_order_line__inventory_uom", "material",
     "customer_material", "uom", "source_location",
 )
-SalesReturnViewSet = make_viewset(SalesReturn, SalesReturnSerializer)
-SalesReturnLineViewSet = make_viewset(SalesReturnLine, SalesReturnLineSerializer)
+
+
+class DeliveryOrderLineViewSet(_DeliveryOrderLineBase):
+    def lock_source(self, request, instance=None):
+        parents = [request.data.get("delivery"), getattr(instance, "delivery_id", None)]
+        parent_ids = [serializers.IntegerField(min_value=1).run_validation(value) for value in parents if value]
+        list(DeliveryOrder.objects.select_for_update().filter(pk__in=parent_ids).order_by("pk"))
+        ids = [request.data.get("sales_order_line")]
+        if instance:
+            ids.append(instance.sales_order_line_id)
+        try:
+            ids = [int(value) for value in ids if value]
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("订单行编号无效")
+        list(SalesOrderLine.objects.select_for_update().filter(pk__in=ids).order_by("pk"))
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        self.lock_source(request)
+        return super().create(request, *args, **kwargs)
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.lock_source(request, instance)
+        result = super().update(request, *args, **kwargs)
+        DeliveryOrder.objects.filter(pk=instance.delivery_id).update(updated_at=timezone.now())
+        return result
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.lock_source(request, instance)
+        result = super().destroy(request, *args, **kwargs)
+        DeliveryOrder.objects.filter(pk=instance.delivery_id).update(updated_at=timezone.now())
+        return result
+
+    def perform_create(self, serializer):
+        from backend.delivery import order_line_data
+        source = serializer.validated_data["sales_order_line"]
+        line = serializer.save(created_by=self.request.user.get_username(), source_snapshot=order_line_data(source))
+        DeliveryOrder.objects.filter(pk=line.delivery_id).update(updated_at=timezone.now())
+
+    def perform_update(self, serializer):
+        ensure_editable(serializer.instance)
+        from backend.delivery import order_line_data
+        source = serializer.validated_data.get("sales_order_line", serializer.instance.sales_order_line)
+        snapshot = serializer.instance.source_snapshot
+        if not snapshot or snapshot.get("sales_order_line") != source.pk:
+            snapshot = order_line_data(source)
+        line = serializer.save(updated_by=self.request.user.get_username(), modification_count=serializer.instance.modification_count + 1, source_snapshot=snapshot)
+        DeliveryOrder.objects.filter(pk=line.delivery_id).update(updated_at=timezone.now())
+
+class SalesReturnViewSet(make_viewset(SalesReturn, SalesReturnSerializer)):
+    queryset = SalesReturn.objects.all()
+    serializer_class = SalesReturnSerializer
+
+    @transaction.atomic
+    def transition(self, obj, action, actor="", reason=""):
+        obj = SalesReturn.objects.select_for_update().get(pk=obj.pk)
+        if action == "approve" and obj.status == ApprovalStatus.APPROVED:
+            return response.Response(self.get_serializer(obj).data)
+        return super().transition(obj, action, actor, reason)
+
+
+class SalesReturnLineViewSet(make_viewset(SalesReturnLine, SalesReturnLineSerializer)):
+    def lock_source(self, request, instance=None):
+        parents = [request.data.get("sales_return"), getattr(instance, "sales_return_id", None)]
+        parent_ids = [serializers.IntegerField(min_value=1).run_validation(value) for value in parents if value]
+        list(SalesReturn.objects.select_for_update().filter(pk__in=parent_ids).order_by("pk"))
+        raw_orders = [request.data.get("sales_order_line"), getattr(instance, "sales_order_line_id", None)]
+        raw_deliveries = [request.data.get("source_delivery_line"), getattr(instance, "source_delivery_line_id", None)]
+        ids = []
+        for raw_order in filter(None, raw_orders):
+            ids.append(serializers.IntegerField(min_value=1).run_validation(raw_order))
+        for raw_delivery in filter(None, raw_deliveries):
+            key = serializers.IntegerField(min_value=1).run_validation(raw_delivery)
+            ids.extend(DeliveryOrderLine.objects.filter(pk=key).values_list("sales_order_line_id", flat=True))
+        list(SalesOrderLine.objects.select_for_update().filter(pk__in=ids).order_by("pk"))
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        self.lock_source(request)
+        return super().create(request, *args, **kwargs)
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        self.lock_source(request, self.get_object())
+        return super().update(request, *args, **kwargs)
 
 
 class SalesQuoteViewSet(ApprovalViewSet):
@@ -456,20 +541,30 @@ class SalesQuoteViewSet(ApprovalViewSet):
             created_by=request.user.get_username(),
         )
         for line in quote.lines.all():
-            order_line = SalesOrderLine.objects.create(
+            requested_lines = request.data.get("lines", {})
+            if not isinstance(requested_lines, dict):
+                raise serializers.ValidationError({"lines": "按报价行ID提供本次正式数量和备品计划"})
+            quantities = requested_lines.get(str(line.pk), {})
+            if not isinstance(quantities, dict):
+                raise serializers.ValidationError({"lines": "报价行数量格式无效"})
+            quantity_field = serializers.DecimalField(max_digits=19, decimal_places=8, min_value=Decimal("0"))
+            order_line = SalesOrderLine(
                 order=order,
                 line_number=line.line_number,
                 material=line.material,
                 customer_material=line.customer_material,
                 uom=line.uom,
-                quantity=line.quantity.quantize(Decimal("0.000001")),
-                spare_quantity=Decimal("0"),
+                quantity=quantity_field.run_validation(quantities.get("quantity", line.quantity)),
+                spare_quantity=quantity_field.run_validation(quantities.get("spare_quantity", 0)),
                 unit_price=line.unit_price.quantize(Decimal("0.000001")),
                 promised_date=line.promised_date or order.promised_date,
                 source_quote_line=line,
             )
             order_line.sync_derived_values()
-            order_line.full_clean()
+            try:
+                order_line.full_clean()
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError(exc.messages) from exc
             order_line.save()
         AuditEvent.objects.create(
             model=order._meta.label_lower,

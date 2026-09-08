@@ -280,7 +280,7 @@ class LegacyImporter:
                 "delivery_address": text(row.get("送货地址"))[:240], "operating_address": text(row.get("经营地址"))[:240],
                 "notes": text(row.get("备注") or row.get("客户备注") or row.get("供应商备注"))[:255],
                 "website": text(row.get("网址") or row.get("公司网址"))[:200] if text(row.get("网址") or row.get("公司网址")).startswith(("http://", "https://")) else "",
-                "currency": currency, "payment_method": text(row.get("支付方式"))[:80], "payment_terms": text(row.get("支付方式名称") or row.get("付款条件"))[:80],
+                "payment_method": text(row.get("支付方式"))[:80], "payment_terms": text(row.get("支付方式名称") or row.get("付款条件"))[:80],
                 "quote_method": text(row.get("报价方式"))[:40], "tax_calculation_method": text(row.get("课税类别"))[:80],
                 "invoice_type": text(row.get("发票类型"))[:40], "tax_rate": decimal_value(row.get("增值税率%")),
                 "discount_rate": decimal_value(row.get("折扣率%"), "100"), "tax_number": text(row.get("税号"))[:32],

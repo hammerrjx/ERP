@@ -36,10 +36,15 @@ imports, notifications, or MRP planning have a measured need.
 
 ## Code organization
 
-- Django model ownership remains in `backend/models.py`. The `backend/domain/`
-  modules provide domain-specific import boundaries only, so no table name,
-  migration, foreign key, or app label changes are introduced during code
-  organization.
+- `backend/domain/` owns model implementations by business module: shared audit
+  behavior in `base.py`, then master data, system, engineering, sales, delivery,
+  purchase, and inventory. `backend/models.py` exposes the existing model names
+  for Django discovery and established imports. Cross-module relations use
+  Django string references; table names and the `backend` app label stay stable.
+- `backend/master_data/serializers/` groups validation and API representations
+  by the same modules, with separate sales quote and order serializers. Its
+  `__init__.py` preserves the existing serializer import paths. `common.py`
+  owns only shared model validation and the generic serializer factory.
 - HTTP endpoints are organized in `backend/master_data/*_views.py` by system,
   master data, engineering, sales, purchasing, and inventory. The established
   `backend/master_data/views.py` remains a compatibility export for the router;

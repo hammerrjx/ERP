@@ -1,7 +1,6 @@
 """Import linked delivery history from read-only dgyzx1 source."""
 from collections import defaultdict
 from datetime import datetime
-from decimal import Decimal
 import json
 
 from django.core.management.base import BaseCommand, CommandError
@@ -55,9 +54,8 @@ class Command(BaseCommand):
                 result = cursor.execute(sql, params)
                 columns = [item[0] for item in result.description]
                 return [dict(zip(columns, row)) for row in result.fetchall()]
-            headers = rows(f"""SELECT TOP {limit} dn_dn,dn_date,dn_cust,dn_loc,dn_rmks,dn_doc_type,
-                dn_wf_status,dn_crt_by,dn_crt_date,dn_mod_by,dn_mod_date,dn_pst,dn_pst_by,dn_pst_date,
-                dn_sig,dn_sig_by,dn_sig_date,dn_cfm,dn_cfm_by,dn_cfm_date,dn_src_nbr FROM dbo.dn_mstr WHERE EXISTS (SELECT 1 FROM dbo.dnd_det d WHERE d.dnd_dn=dn_mstr.dn_dn)
+            headers = rows(f"""SELECT TOP {limit} * FROM dbo.dn_mstr
+                WHERE EXISTS (SELECT 1 FROM dbo.dnd_det d WHERE d.dnd_dn=dn_mstr.dn_dn)
                 ORDER BY dn_date,dn_dn""")
             dn_numbers = [clean(r["dn_dn"]) for r in headers]
             ph = ",".join("?" for _ in dn_numbers) or "?"
@@ -108,7 +106,7 @@ class Command(BaseCommand):
         for row in source["locations"]:
             code = clean(row.get("loc_loc"))
             if code and key(code) not in locations:
-                locations[key(code)] = Location.objects.create(code=code, name=clean(row.get("loc_desc")) or code, usable=bool(row.get("loc_avail")), participate_mrp=bool(row.get("loc_nettable")), disabled_for_inventory=bool(row.get("loc_disabled")), status=ApprovalStatus.APPROVED, created_by="dgyzx1-import")
+                locations[key(code)] = Location.objects.create(code=code, source_site=clean(row.get("loc_site")), name=clean(row.get("loc_desc")) or code, usable=bool(row.get("loc_avail")), participate_mrp=bool(row.get("loc_nettable")), disabled_for_inventory=bool(row.get("loc_disabled")), status=ApprovalStatus.APPROVED, created_by="dgyzx1-import")
         if not category:
             category = ProductCategory.objects.create(code="LEGACY", name="历史物料", default_uom=next(iter(units.values()), None), default_location=next(iter(locations.values()), None), status=ApprovalStatus.APPROVED, created_by="dgyzx1-import")
         materials = {key(x.code): x for x in Material.objects.all()}
@@ -120,7 +118,7 @@ class Command(BaseCommand):
         for row in source["customer_materials"]:
             customer, material, code = partners.get(key(row.get("cp_cust"))), materials.get(key(row.get("cp_part"))), clean(row.get("cp_cust_part"))
             if customer and material and code:
-                CustomerMaterial.objects.update_or_create(customer=customer, material=material, customer_code=code, defaults={"customer_name": clean(row.get("cp_cust_desc")), "customer_uom": units.get(key(row.get("cp_um"))), "customer_uom_rate_m": row.get("cp_um_rate_m") or 1, "customer_uom_rate_d": row.get("cp_um_rate_d") or 1, "enabled": True, "created_by": "dgyzx1-import"})
+                CustomerMaterial.objects.update_or_create(customer=customer, material=material, customer_code=code, defaults={"customer_name": clean(row.get("cp_cust_desc")), "customer_uom": units.get(key(row.get("cp_um"))), "customer_uom_rate_m": row.get("cp_um_rate_m") or 1, "customer_uom_rate_d": row.get("cp_um_rate_d") or 1, "terminal_customer_code": clean(row.get("cp_char1")), "terminal_customer_name": clean(row.get("cp_char2")), "notes": clean(row.get("cp_cmmt")), "enabled": True, "created_by": "dgyzx1-import"})
         for row in source["addresses"]:
             customer = partners.get(key(row.get("ca_cust"))); code = clean(row.get("ca_addr"))
             if customer and code:
@@ -142,7 +140,7 @@ class Command(BaseCommand):
             order, material, uom = order_map.get(key(row.get("sod_nbr"))), materials.get(key(row.get("sod_part"))), units.get(key(row.get("sod_um")))
             if not order or not material or not uom: raise CommandError(f"销售订单行依赖缺失: {row.get('sod_nbr')}/{row.get('sod_line')}")
             cm = CustomerMaterial.objects.filter(customer=order.customer, material=material, customer_code=clean(row.get("sod_cust_part"))).first()
-            line, _ = SalesOrderLine.objects.update_or_create(order=order, line_number=int(row.get("sod_line") or 0), defaults={"material": material, "customer_material": cm, "uom": uom, "quantity": row.get("sod_qty_ord") or 1, "spare_quantity": row.get("sod_qty_spare") or 0, "unit_price": row.get("sod_price") or 0, "promised_date": date_value(row.get("sod_promise_date")) or order.promised_date, "delivered_quantity": row.get("sod_qty_shp") or 0, "delivered_spare_quantity": row.get("sod_qty_spare_shp") or 0})
+            line, _ = SalesOrderLine.objects.update_or_create(order=order, line_number=int(row.get("sod_line") or 0), defaults={"material": material, "customer_material": cm, "uom": uom, "quantity": row.get("sod_qty_ord") or 0, "spare_quantity": row.get("sod_qty_spare") or 0, "unit_price": row.get("sod_price") or 0, "promised_date": date_value(row.get("sod_promise_date")) or order.promised_date, "delivered_quantity": row.get("sod_qty_shp") or 0, "delivered_spare_quantity": row.get("sod_qty_spare_shp") or 0, "returned_quantity": row.get("sod_qty_rtn") or 0, "returned_spare_quantity": row.get("sod_qty_spare_rtn") or 0})
             order_line_map[(key(row.get("sod_nbr")), int(row.get("sod_line") or 0))] = line
         lines_by_dn = defaultdict(list)
         for row in source["lines"]: lines_by_dn[key(row.get("dnd_dn"))].append(row)
@@ -155,20 +153,21 @@ class Command(BaseCommand):
             if not customer: raise CommandError(f"送货客户依赖缺失: {dn}")
             first = lines_by_dn[key(dn)][0]; order_line = order_line_map.get((key(first.get("dnd_so")), int(first.get("dnd_so_line") or 0)))
             if not order_line: raise CommandError(f"送货来源订单行缺失: {dn}")
-            address_code = clean(next((x.get("so_addr") for x in source["orders"] if key(x.get("so_nbr")) == key(first.get("dnd_so"))), ""))
+            address_code = clean(header.get("dn_txt"))
             address = CustomerAddress.objects.filter(customer=customer, code=address_code, enabled=True).first()
-            if not address and address_code:
-                address = CustomerAddress.objects.filter(customer=customer, address=address_code, enabled=True).first()
-            if not address:
-                address = CustomerAddress.objects.filter(customer=customer, enabled=True).order_by("code").first()
+            modes = {"1": SalesOrder.DeliveryMode.DIRECT, "2": SalesOrder.DeliveryMode.SUPPLIER}
+            types = {"正常送货": "normal", "正常退货": "return", "红冲单据": "red_flush"}
+            if clean(header.get("dn_char1")) not in modes or clean(header.get("dn_char4")) not in types:
+                raise CommandError(f"{dn}: 源库送货模式或业务模式不在已确认字典中")
+            source_orders = {order_line_map[(key(r["dnd_so"]), int(r["dnd_so_line"]))].order_id for r in lines_by_dn[key(dn)]}
             line_locations = [locations.get(key(row.get("dnd_loc")) or key(header.get("dn_loc"))) for row in lines_by_dn[key(dn)]]
             head_location = line_locations[0] if line_locations and all(item and item.id == line_locations[0].id for item in line_locations) else None
-            delivery, _ = DeliveryOrder.objects.update_or_create(number=dn, defaults={"customer": customer, "sales_order": order_line.order, "delivery_date": date_value(header.get("dn_date")) or timezone.localdate(), "delivery_address": (address.address if address else customer.delivery_address or customer.address)[:240], "address_code": address.code if address else "", "address_snapshot": address.address if address else "", "source_location": head_location, "default_print_person": prints.get(key(dn), ""), "document_type": DeliveryOrder.DocumentType.NORMAL, "delivery_mode": SalesOrder.DeliveryMode.DIRECT, "srm_number": clean(header.get("dn_src_nbr")) or dn, "customer_po": order_line.order.customer_po, "notes": "", "status": ApprovalStatus.APPROVED if header.get("dn_pst") else ApprovalStatus.DRAFT, "posted": bool(header.get("dn_pst")), "created_by": clean(header.get("dn_crt_by")) or "dgyzx1-import", "approved_by": clean(header.get("dn_sig_by")) if header.get("dn_sig") else "", "approved_at": datetime_value(header.get("dn_sig_date")) if header.get("dn_sig") else None, "confirmed_by": clean(header.get("dn_cfm_by")) if header.get("dn_cfm") else "", "confirmed_at": datetime_value(header.get("dn_cfm_date")) if header.get("dn_cfm") else None, "is_confirmed": bool(header.get("dn_cfm"))})
+            delivery, _ = DeliveryOrder.objects.update_or_create(number=dn, defaults={"customer": customer, "sales_order": order_line.order if len(source_orders) == 1 else None, "delivery_date": date_value(header.get("dn_date")) or timezone.localdate(), "delivery_address": clean(header.get("dn_char3")), "address_code": address_code, "address_snapshot": address.address if address else "", "source_location": head_location, "default_print_person": clean(header.get("dn_char6")), "document_type": types[clean(header.get("dn_char4"))], "delivery_mode": modes[clean(header.get("dn_char1"))], "srm_number": clean(header.get("dn_char2")), "customer_po": order_line.order.customer_po if len(source_orders) == 1 else "", "notes": clean(header.get("dn_rmks")), "status": ApprovalStatus.APPROVED if header.get("dn_pst") else ApprovalStatus.DRAFT, "posted": bool(header.get("dn_pst")), "created_by": clean(header.get("dn_crt_by")) or "dgyzx1-import", "approved_by": clean(header.get("dn_sig_by")) if header.get("dn_sig") else "", "approved_at": datetime_value(header.get("dn_sig_date")) if header.get("dn_sig") else None, "confirmed_by": clean(header.get("dn_cfm_by")) if header.get("dn_cfm") else "", "confirmed_at": datetime_value(header.get("dn_cfm_date")) if header.get("dn_cfm") else None, "is_confirmed": bool(header.get("dn_cfm"))})
             for row in lines_by_dn[key(dn)]:
                 order_line = order_line_map.get((key(row.get("dnd_so")), int(row.get("dnd_so_line") or 0))); material = materials.get(key(row.get("dnd_part"))); uom = units.get(key(row.get("dnd_um"))); location = locations.get(key(row.get("dnd_loc")) or key(header.get("dn_loc"))) or material.default_location
                 if not order_line or not material or not uom or not location: raise CommandError(f"送货明细依赖缺失: {dn}/{row.get('dnd_line')}")
                 cm = CustomerMaterial.objects.filter(customer=customer, material=material, customer_code=clean(next((x.get("sod_cust_part") for x in source["order_lines"] if key(x.get("sod_nbr")) == key(row.get("dnd_so")) and int(x.get("sod_line") or 0) == int(row.get("dnd_so_line") or 0)), ""))).first()
-                DeliveryOrderLine.objects.update_or_create(delivery=delivery, line_number=int(row.get("dnd_line") or 0), defaults={"sales_order_line": order_line, "material": material, "customer_material": cm, "uom": uom, "actual_quantity": row.get("dnd_qty_shipped") or row.get("dnd_qty_ship") or 1, "ordered_spare_quantity": row.get("dnd_qty_spare") or 0, "actual_spare_quantity": row.get("dnd_qty_spared") or row.get("dnd_qty_spare_ship") or 0, "source_location": location, "batch_number": clean(row.get("dnd_lot")), "srm_customer_po": order_line.order.customer_po, "srm_material_code": cm.customer_code if cm else material.code, "srm_material_name": material.name, "srm_quantity": row.get("dnd_qty_shipped") or row.get("dnd_qty_ship") or 1})
+                DeliveryOrderLine.objects.update_or_create(delivery=delivery, line_number=int(row.get("dnd_line") or 0), defaults={"sales_order_line": order_line, "material": material, "customer_material": cm, "uom": uom, "actual_quantity": row.get("dnd_qty_ship") or 0, "ordered_spare_quantity": row.get("dnd_qty_spare") or 0, "actual_spare_quantity": row.get("dnd_qty_spare_ship") or 0, "source_location": location, "batch_number": clean(row.get("dnd_lot")), "notes": clean(row.get("dnd_rmks")), "created_by": clean(row.get("dnd_crt_by")), "source_snapshot": {"ordered_quantity": str(row.get("dnd_qty_ord") or 0), "delivered_quantity": str(row.get("dnd_qty_shipped") or 0), "delivered_spare_quantity": str(row.get("dnd_qty_spared") or 0)}, "srm_customer_po": order_line.order.customer_po, "srm_material_code": cm.customer_code if cm else material.code, "srm_material_name": material.name, "srm_quantity": row.get("dnd_qty_ship") or 0})
             imported += 1
         return imported
 
@@ -191,14 +190,19 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if not 1 <= options["limit"] <= 5000: raise CommandError("--limit 必须在 1 到 5000 之间")
         source = self.read_source(options["limit"], options.get("source_file"))
+        sites = defaultdict(set)
+        for row in source.get("locations", []):
+            sites[key(row.get("loc_loc"))].add(key(row.get("loc_site")))
+        if any(len(values) > 1 for values in sites.values()):
+            raise CommandError("源库存在跨工厂同码库位，当前单工厂模型不可合并导入")
         if options["bootstrap_dependencies"] and not options["commit"]: raise CommandError("--bootstrap-dependencies 必须与 --commit 一起使用")
         if options["commit"]:
             with transaction.atomic():
                 if options["bootstrap_dependencies"]: self.bootstrap(source)
                 count = self.import_rows(source)
-            result = self.verify(source)
-            if result["errors"]:
-                raise CommandError("导入后关联校验失败：" + "；".join(result["errors"][:8]))
+                result = self.verify(source)
+                if result["errors"]:
+                    raise CommandError("导入后关联校验失败：" + "；".join(result["errors"][:8]))
             self.stdout.write(self.style.SUCCESS(f"已导入 {count} 张送货单、{result['lines']} 行明细及其关联数据；关联校验通过，历史已过账记录未重复扣库存。"))
         else:
             self.stdout.write(f"源送货单 {len(source.get('headers', []))} 张，明细 {len(source.get('lines', []))} 行；只读预检未写入本地。")

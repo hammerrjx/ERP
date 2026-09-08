@@ -21,7 +21,8 @@ def _approved_owner(obj, seen=None):
     if marker in seen:
         return None
     seen.add(marker)
-    if _has_status_field(obj.__class__) and getattr(obj, "status", None) == ApprovalStatus.APPROVED:
+    if _has_status_field(obj.__class__) and (getattr(obj, "status", None) == ApprovalStatus.APPROVED
+            or (obj._meta.model_name in {"deliveryorder", "salesreturn"} and obj.posted)):
         return obj
     for field in obj._meta.get_fields():
         if not getattr(field, "many_to_one", False) or field.remote_field.on_delete is not models.CASCADE:
@@ -72,6 +73,7 @@ class ErpRolePermission(permissions.BasePermission):
         "void": "delete", "restore": "change", "convert": "create",
         "auto_generate": "create", "generate_requisition": "create",
         "generate_from_order": "create", "generate_receipt": "create",
+        "reserve_number": "create", "save_sheet": "create", "update_sheet": "change", "order_candidates": "view",
         "delivery_approve": "approve", "delivery_unapprove": "approve",
         "po_change_confirm": "approve", "po_change_unconfirm": "approve", "print": "view",
         "export": "view",
@@ -120,6 +122,13 @@ class ApprovalViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def transition(self, obj, action, actor="", reason=""):
+        if obj._meta.model_name in {"deliveryorder", "salesreturn", "salesorder"}:
+            obj = type(obj).objects.select_for_update().get(pk=obj.pk)
+        if obj._meta.model_name in {"deliveryorder", "salesreturn"} and obj.posted:
+            if action == "approve" and obj.status == ApprovalStatus.APPROVED:
+                return response.Response(self.get_serializer(obj).data)
+            if action not in {"confirm", "unconfirm"}:
+                raise serializers.ValidationError("已生效单据只能登记回单或通过退货、红冲纠正")
         try:
             if action == "approve":
                 obj.approve(actor)

@@ -26,7 +26,10 @@ tmp/
 outputs/
 .codex/
 .memorax-code/
-
+# Conversation plans, investigation reports, and generated documentation
+/mymd/
+/docs/
+/backend/docs/
 # Local environment variants
 .env.*
 !.env.example
@@ -35,8 +38,3 @@ outputs/
 .idea/
 .DS_Store
 Thumbs.db
-
-# MD
-提示词.md
-Plan.md
-Debug.md

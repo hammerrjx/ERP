@@ -1,4 +1,4 @@
-from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from rest_framework.test import APITestCase
 
 from backend.test_support import CoreFlowSupport
@@ -178,7 +178,7 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         self.assertEqual(generated.status_code, 201, generated.data)
         line = self.client.get("/api/delivery-order-line/").data[0]
         self.assertEqual(line["sales_order_line"], order_line["id"])
-        self.assertEqual(line["actual_quantity"], "8.000000")
+        self.assertEqual(line["actual_quantity"], "8.00000000")
         self.assertEqual(line["source_location"], context["location"]["id"])
 
     def test_order_delivery_return_then_redelivery_reopens_order_quantity(self):
@@ -224,20 +224,20 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         })
         self.approve("sales-return", returned["id"])
         refreshed = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
-        self.assertEqual(refreshed.data["delivered_quantity"], "0.000000")
-        self.assertEqual(refreshed.data["returned_quantity"], "50.000000")
+        self.assertEqual(refreshed.data["delivered_quantity"], "0.00000000")
+        self.assertEqual(refreshed.data["returned_quantity"], "50.00000000")
         second_delivery = self.client.post("/api/delivery-order/generate-from-order/", {
             "sales_order": order["id"], "delivery_date": "2026-09-03", "delivery_address": "客户仓",
             "delivery_mode": "direct", "srm_number": "SRM-ROUNDTRIP-2", "customer_po": "PO-ROUNDTRIP",
         }, format="json")
         self.assertEqual(second_delivery.status_code, 201, second_delivery.data)
         second_line = next(line for line in self.client.get("/api/delivery-order-line/").data if line["delivery"] == second_delivery.data["id"])
-        self.assertEqual(second_line["actual_quantity"], "100.000000")
+        self.assertEqual(second_line["actual_quantity"], "100.00000000")
         self.approve("delivery-order", second_delivery.data["id"])
         refreshed = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
-        self.assertEqual(refreshed.data["delivered_quantity"], "100.000000")
+        self.assertEqual(refreshed.data["delivered_quantity"], "100.00000000")
         balance = self.client.get("/api/stock-balance/").data[0]
-        self.assertEqual(balance["quantity"], "150.000000")
+        self.assertEqual(balance["quantity"], "100.000000")
 
     def test_order_return_can_reference_order_line_without_delivery_header(self):
         context = self.base_context()
@@ -273,8 +273,8 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         self.assertEqual(line["sales_order_line"], order_line["id"])
         self.approve("sales-return", returned["id"])
         refreshed = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
-        self.assertEqual(refreshed.data["delivered_quantity"], "0.000000")
-        self.assertEqual(refreshed.data["returned_quantity"], "50.000000")
+        self.assertEqual(refreshed.data["delivered_quantity"], "0.00000000")
+        self.assertEqual(refreshed.data["returned_quantity"], "50.00000000")
 
     def test_delivery_validates_srm_fields_and_posts_exact_actual_quantity(self):
         context = self.base_context()
@@ -309,10 +309,11 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         balance = self.client.get("/api/stock-balance/").data[0]
         self.assertEqual(balance["quantity"], "10.000000")
         refreshed_line = self.client.get(f"/api/delivery-order-line/{delivery_line['id']}/")
-        self.assertEqual(refreshed_line.data["actual_quantity"], "4.000000")
+        self.assertEqual(refreshed_line.data["actual_quantity"], "4.00000000")
         sales_line = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
-        self.assertEqual(sales_line.data["delivered_quantity"], "4.000000")
+        self.assertEqual(sales_line.data["delivered_quantity"], "4.00000000")
 
+    @override_settings(ERP_DELIVERY_POST_STOCK=True)
     def test_no_order_sales_return_from_fg01_must_enter_quarantine_location(self):
         context = self.base_context()
         quarantine = self.post("location", {
@@ -356,7 +357,7 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         }, format="json")
         self.assertEqual(delivery.status_code, 201, delivery.data)
         generated = self.client.get("/api/delivery-order-line/").data[0]
-        self.assertEqual(generated["actual_quantity"], "2.000000")
+        self.assertEqual(generated["actual_quantity"], "2.00000000")
         self.assertEqual(generated["source_location"], context["location"]["id"])
 
         detail = self.client.get(f"/api/delivery-order/{delivery.data['id']}/")
@@ -393,11 +394,11 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
             return response.data["id"]
 
         generate("normal", "50", "01")
-        generate("return", "50")
+        generate("return", "-50")
         generate("normal", "100")
         refreshed = self.client.get(f"/api/sales-order-line/{line['id']}/")
-        self.assertEqual(refreshed.data["delivered_quantity"], "100.000000")
-        self.assertEqual(refreshed.data["returned_quantity"], "50.000000")
+        self.assertEqual(refreshed.data["delivered_quantity"], "100.00000000")
+        self.assertEqual(refreshed.data["returned_quantity"], "0.00000000")
 
         invalid = self.client.post("/api/delivery-order/generate-from-order/", {
             "sales_order": order["id"], "customer": context["customer"]["id"],

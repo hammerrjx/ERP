@@ -4,7 +4,7 @@ import xlrd
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from backend.models import (Currency, CustomerMaterial, DeliveryOrder, Department, Location, Material,
-    Partner, PaymentMethod, ProductCategory, SalesQuote, SupplierQuote, Uom, UomCategory)
+    Partner, PaymentMethod, ProductCategory, SalesQuote, SupplierQuote, Uom)
 
 FILES = {
     'department': '1.4 -- 部门(AMDPMTA1).xls', 'payment': '1.9 -- 支付方式(AMCTMTA1).xls',

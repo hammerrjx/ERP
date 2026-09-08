@@ -40,7 +40,10 @@ TEMPLATES = [{
     ]},
 }]
 WSGI_APPLICATION = "erp_backend.wsgi.application"
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+DATABASES = {"default": {
+    "ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3",
+    "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20},
+}}
 if os.getenv("ERP_DB_NAME"):
     DATABASES["default"] = {
         "ENGINE": "django.db.backends.postgresql",

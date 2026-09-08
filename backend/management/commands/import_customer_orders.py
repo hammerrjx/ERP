@@ -1,15 +1,13 @@
 """Import the latest 20 linked customer orders from read-only dgyzx1."""
-from collections import OrderedDict
 from datetime import datetime
-from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
 from backend.models import (ApprovalStatus, Currency, CustomerAddress, CustomerMaterial,
-    Material, Partner, PaymentMethod, ProductCategory, SalesOrder, SalesOrderLine,
-    SalesQuoteLine, Uom, UomCategory, Location)
+    Material, Partner, ProductCategory, SalesOrder, SalesOrderLine,
+    Uom, UomCategory, Location)
 
 
 def clean(value): return str(value or '').strip()
@@ -47,7 +45,6 @@ class Command(BaseCommand):
             materials=rows(f"SELECT * FROM dbo.pt_mstr WHERE pt_part IN ({php})", parts or [''])
             cps=[]
             for cust in cust_codes: cps.extend(rows(f"SELECT * FROM dbo.cp_mstr WHERE cp_cust=? AND cp_part IN ({php})", [cust, *(parts or [''])]))
-            currencies=rows("SELECT * FROM dbo.exr_mstr") if False else []
             return {'orders':chosen,'lines':lines,'customers':customers,'addresses':addresses,'materials':materials,'customer_materials':cps}
 
     def import_rows(self, source):
@@ -90,8 +87,7 @@ class Command(BaseCommand):
                 material=materials.get(key(row.get('sod_part'))); uom=units.get(key(row.get('sod_um'))) or (material.uom if material else None)
                 if not material or not uom: raise CommandError(f'订单行依赖缺失: {header["so_nbr"]}/{row.get("sod_line")}')
                 cm=CustomerMaterial.objects.filter(customer=customer,material=material,customer_code=clean(row.get('sod_cust_part'))).first()
-                quote_line=SalesQuoteLine.objects.filter(quote__customer=customer,quote__currency=currency,material=material,customer_material_code=clean(row.get('sod_cust_part')),quote__is_ratified=True).order_by('-quote__effective_date').first()
-                SalesOrderLine.objects.update_or_create(order=order,line_number=int(row.get('sod_line') or 0),defaults={'material':material,'customer_material':cm,'uom':uom,'quantity':row.get('sod_qty_ord') or 1,'spare_quantity':row.get('sod_qty_spare') or 0,'unit_price':row.get('sod_price') or row.get('sod_list_price') or 0,'promised_date':day(row.get('sod_promise_date') or row.get('sod_due_date') or header.get('so_ord_date')),'delivered_quantity':row.get('sod_qty_shp') or 0,'delivered_spare_quantity':row.get('sod_qty_spare_shp') or 0,'source_quote_line':quote_line})
+                SalesOrderLine.objects.update_or_create(order=order,line_number=int(row.get('sod_line') or 0),defaults={'material':material,'customer_material':cm,'uom':uom,'quantity':row.get('sod_qty_ord') or 0,'spare_quantity':row.get('sod_qty_spare') or 0,'unit_price':row.get('sod_price') if row.get('sod_price') is not None else row.get('sod_list_price') or 0,'promised_date':day(row.get('sod_promise_date') or row.get('sod_due_date') or header.get('so_ord_date')),'delivered_quantity':row.get('sod_qty_shp') or 0,'delivered_spare_quantity':row.get('sod_qty_spare_shp') or 0,'returned_quantity':row.get('sod_qty_rtn') or 0,'returned_spare_quantity':row.get('sod_qty_spare_rtn') or 0,'source_quote_line':None})
         return len(by_order), sum(len(v) for v in lines_by.values())
 
     def handle(self,*args,**opts):

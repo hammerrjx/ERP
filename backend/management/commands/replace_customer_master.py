@@ -1,5 +1,4 @@
 """Replace legacy test customers, import the customer workbook, then sync source addresses."""
-from collections import Counter
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -9,9 +8,7 @@ from backend.management.commands.import_legacy_master_data import (
     LegacyImporter, WorkbookRows, canonical, is_obvious_test, text,
 )
 from backend.models import (
-    ApprovalStatus, CustomerAddress, CustomerMaterial, DeliveryOrder, DeliveryOrderLine,
-    GoodsReceipt, Partner, PartnerBankAccount, PartnerCompany, PartnerContact,
-    PurchaseOrder, PurchaseReturn, PayableVoucher, SalesOrder, SalesQuote, SalesReturn,
+    ApprovalStatus, CustomerAddress, CustomerMaterial, DeliveryOrder, GoodsReceipt, Partner, PurchaseOrder, PurchaseReturn, PayableVoucher, SalesOrder, SalesQuote, SalesReturn,
     SupplierInquiry, SupplierQuote,
 )
 

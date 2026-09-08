@@ -1,13 +1,7 @@
-import { useMemo, useState } from 'react'
-import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Eye, FileCheck, Plus, Printer, RotateCcw, Save, Search, Settings, Trash2, Wrench, X } from 'lucide-react'
-import { labelFor, today } from '../../shared/presentation'
-
-const EMPTY_LINE = { sales_order_line: '', actual_quantity: '', actual_spare_quantity: '0', source_location: '', batch_number: '', notes: '' }
-
-function optionLabel(options, value) {
-  const item = options.find(option => option.id === Number(value))
-  return item ? labelFor(item) : value || ''
-}
+import { useEffect, useRef, useState } from 'react'
+import { Check, ChevronLeft, ChevronRight, Copy, Plus, RotateCcw, Save, Search, Trash2, Wrench, X } from 'lucide-react'
+import { api } from '../../api/client'
+import { today } from '../../shared/presentation'
 
 function CodeLookup({ id, label, value, options, onChange, disabled, required }) {
   const selected = options.find(option => option.id === Number(value))
@@ -15,7 +9,7 @@ function CodeLookup({ id, label, value, options, onChange, disabled, required })
   const [open, setOpen] = useState(false)
   const visible = options.filter(option => [option.code, option.name].filter(Boolean).join(' ').toLowerCase().includes(query.trim().toLowerCase())).slice(0, 30)
   const displayValue = query || selected?.code || ''
-  return <div className="lookup-field delivery-code-lookup"><input id={id} required={required} value={displayValue} placeholder="输入代码或名称检索" onFocus={() => setOpen(true)} onChange={event => { setOpen(true); setQuery(event.target.value); onChange('') }} onBlur={() => setTimeout(() => setOpen(false), 150)} disabled={disabled} />{open && !disabled ? <div className="lookup-menu">{visible.map(option => <button type="button" key={option.id} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(option.id); setQuery(''); setOpen(false) }}><strong>{option.code}</strong><span>{option.name}</span></button>)}{visible.length === 0 ? <div className="lookup-empty">无匹配项</div> : null}</div> : null}<small className="field-related-name">{selected?.name || '输入代码或名称检索后选择'}</small></div>
+  return <div className="lookup-field delivery-code-lookup"><input id={id} required={required} value={displayValue} placeholder="输入代码或名称检索" onFocus={() => setOpen(true)} onChange={event => { setOpen(true); setQuery(event.target.value); onChange('') }} onBlur={() => setTimeout(() => setOpen(false), 150)} disabled={disabled} />{open && !disabled ? <div className="lookup-menu">{visible.map(option => <button type="button" key={option.id} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(option.id); setQuery(''); setOpen(false) }}><strong>{option.code}</strong><span>{option.name}</span></button>)}{visible.length === 0 ? <div className="lookup-empty">无匹配项</div> : null}</div> : null}<small className="field-related-name">{selected?.name || ''}</small></div>
 }
 
 function AddressLookup({ value, options, onChange, disabled, required }) {
@@ -23,85 +17,183 @@ function AddressLookup({ value, options, onChange, disabled, required }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const visible = options.filter(option => [option.code, option.address].filter(Boolean).join(' ').toLowerCase().includes(query.trim().toLowerCase())).slice(0, 30)
-  return <div className="lookup-field delivery-code-lookup"><input required={required} value={query || selected?.code || value || ''} placeholder="输入代码或名称检索，也可手工填写" onFocus={() => setOpen(true)} onChange={event => { setOpen(true); setQuery(event.target.value); onChange(event.target.value) }} onBlur={() => setTimeout(() => setOpen(false), 150)} disabled={disabled} />{open && !disabled ? <div className="lookup-menu">{visible.map(option => <button type="button" key={option.id} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(option.code); setQuery(''); setOpen(false) }}><strong>{option.code}</strong><span>{option.address}</span></button>)}{visible.length === 0 ? <div className="lookup-empty">无匹配项，可直接使用当前输入</div> : null}</div> : null}<small className="field-related-name">{selected?.address || '可检索维护地址，也可手工填写旧客户地址代码'}</small></div>
+  return <div className="lookup-field delivery-code-lookup"><input required={required} value={query || selected?.code || value || ''} placeholder="输入代码或名称检索，也可手工填写" onFocus={() => setOpen(true)} onChange={event => { setOpen(true); setQuery(event.target.value); onChange(event.target.value) }} onBlur={() => setTimeout(() => setOpen(false), 150)} disabled={disabled} />{open && !disabled ? <div className="lookup-menu">{visible.map(option => <button type="button" key={option.id} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(option.code); setQuery(''); setOpen(false) }}><strong>{option.code}</strong><span>{option.address}</span></button>)}{visible.length === 0 ? <div className="lookup-empty">无匹配项，可直接使用当前输入</div> : null}</div> : null}<small className="field-related-name">{selected?.address || ''}</small></div>
 }
 
-export function DeliveryOrderModal({ lookups, record, onClose, onSave, onClearError, error = '', showErrorInModal = false, readOnly = false, loading = false }) {
-  const orders = lookups.salesOrders || []
-  const orderLines = lookups.salesOrderLines || []
+
+const FILTERS = [
+  ['customer_po', '客户 PO'], ['material_code', '内部物料编码'],
+  ['customer_material_code', '客户物料编码'], ['terminal_material_code', '客户终端物料编码'],
+  ['order_number', '客户订单'],
+]
+const DISPLAY_COLUMNS = [
+  ['physical_quantity', '含备品本次数量'],
+  ['material_name', '物料名称'], ['material_specification', '物料规格'],
+  ['customer_material_code', '客户物料编码'], ['terminal_material_code', '客户终端物料编码'],
+  ['customer_po', '客户 PO'], ['uom_code', '销售单位'], ['unit_price', '销售单价'],
+  ['delivery_amount', '送货金额'], ['currency_code', '币种'], ['tax_rate', '税率'], ['ordered_quantity', '订购数量'],
+  ['spare_quantity', '备品数量'], ['delivered_quantity', '净已送数量'],
+  ['delivered_spare_quantity', '净已送备品'], ['uom_rate_m', '换算分子'],
+  ['uom_rate_d', '换算分母'], ['inventory_uom_code', '库存单位'], ['order_notes', '订单备注'],
+]
+const quantity = value => Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 8 })
+
+function OrderGenerator({ token, customer, delivery, documentType, existing, onClose, onGenerate }) {
+  const [filters, setFilters] = useState({ match: 'contains' })
+  const [result, setResult] = useState({ results: [], count: 0, page: 1 })
+  const [selected, setSelected] = useState({})
+  const [direction, setDirection] = useState(documentType === 'normal' ? 'ship' : 'return')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const requestId = useRef(0)
+  const existingIds = new Set(existing.map(row => Number(row.sales_order_line)))
+  const query = async (page = 1) => {
+    const id = ++requestId.current
+    setBusy(true); setError('')
+    const params = new URLSearchParams({ ...filters, customer, page, ...(delivery ? { delivery } : {}) })
+    try {
+      const response = await api('/delivery-order/order-candidates/?' + params, { token })
+      if (id === requestId.current) setResult(response)
+    } catch (e) { if (id === requestId.current) setError(e.message) }
+    finally { if (id === requestId.current) setBusy(false) }
+  }
+  useEffect(() => { query(); return () => { requestId.current++ } }, [])
+  const toggle = (row, checked) => setSelected(current => {
+    const next = { ...current }
+    if (checked) {
+      next[row.sales_order_line] = { ...row,
+        actual_quantity: direction === 'return' ? String(-Number(row.returnable_quantity)) : row.available_quantity,
+        actual_spare_quantity: direction === 'return' ? String(-Number(row.returnable_spare_quantity)) : row.available_spare_quantity,
+        batch_number: '', notes: '' }
+    } else delete next[row.sales_order_line]
+    return next
+  })
+  const generate = () => {
+    const rows = Object.values(selected)
+    if (!rows.length) return setError('请勾选订单明细')
+    for (const row of rows) {
+      const amount = Number(row.actual_quantity), spare = Number(row.actual_spare_quantity)
+      if (!Number.isFinite(amount) || !Number.isFinite(spare) || (!amount && !spare)) return setError('送货数量与备品数不能同时为0')
+      const limit = amount < 0 ? row.returnable_quantity : row.available_quantity
+      const spareLimit = spare < 0 ? row.returnable_spare_quantity : row.available_spare_quantity
+      if (Math.abs(amount) > Number(limit) || Math.abs(spare) > Number(spareLimit)) return setError(row.order_number + ' / ' + row.order_line_number + '：数量超过当前可用额度')
+    }
+    onGenerate(rows)
+  }
+  const update = (id, key, value) => setSelected(current => ({ ...current, [id]: { ...current[id], [key]: value } }))
+  return <div className="modal-backdrop delivery-overlay"><div role="dialog" aria-modal="true" aria-label="根据客户订单生成明细" className="modal delivery-generator">
+    <div className="modal-head"><h2>根据客户订单生成明细</h2><button type="button" aria-label="关闭生成窗口" onClick={onClose}><X size={19} /></button></div>
+    <form className="delivery-query" onSubmit={event => { event.preventDefault(); query() }}>
+      <label><span>查询方式</span><select value={filters.match} onChange={event => setFilters(current => ({ ...current, match: event.target.value }))}><option value="contains">包含</option><option value="exact">精确</option><option value="range">区间</option></select></label>
+      {FILTERS.map(([key, label]) => <label key={key}><span>{label}</span><div className="delivery-range"><input aria-label={label} value={filters[key] || ''} onChange={event => setFilters(current => ({ ...current, [key]: event.target.value }))} />{filters.match === 'range' && <input aria-label={label + '结束'} value={filters[key + '_to'] || ''} onChange={event => setFilters(current => ({ ...current, [key + '_to']: event.target.value }))} />}</div></label>)}
+      {[['order_date', '下单日期'], ['promised_date', '预计交货日期']].map(([key, label]) => <label key={key}><span>{label}</span><div className="delivery-range"><input type="date" aria-label={label + '开始'} value={filters[key + '_from'] || ''} onChange={event => setFilters(current => ({ ...current, [key + '_from']: event.target.value }))} /><input type="date" aria-label={label + '结束'} value={filters[key + '_to'] || ''} onChange={event => setFilters(current => ({ ...current, [key + '_to']: event.target.value }))} /></div></label>)}
+      <button className="primary" disabled={busy}><Search size={15} />查询</button>
+    </form>
+    <div className="delivery-selection-bar"><label>数量方向 <select value={direction} onChange={event => { setDirection(event.target.value); setSelected({}) }}><option value="ship">送出（正数）</option><option value="return">退回（负数）</option></select></label><button type="button" onClick={() => result.results.filter(row => !existingIds.has(row.sales_order_line)).forEach(row => toggle(row, true))} disabled={busy}>选中本页</button><button type="button" onClick={() => setSelected({})}>全不选</button><span>已选 {Object.keys(selected).length} 行</span></div>
+    {error && <div className="error-banner" role="alert">{error}</div>}
+    <div className="delivery-candidates-wrap"><table className="delivery-candidates"><thead><tr>{['选择', '客户订单', '订单行号', '内部物料编码', '客户物料编码', '终端物料编码', '客户 PO', '物料名称', '订购数量', '净已送数量', '未审核送货', '可送上限', '可退数量', '本次送货数量', '本次备品数', '可送备品', '可退备品', '库存参考'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>
+      {result.results.map(row => { const picked = selected[row.sales_order_line]; return <tr key={row.sales_order_line} className={picked ? 'is-selected' : ''}>
+        <td><input type="checkbox" aria-label={'选择' + row.order_number + '行' + row.order_line_number} checked={Boolean(picked)} disabled={existingIds.has(row.sales_order_line) || busy} onChange={event => toggle(row, event.target.checked)} /></td>
+        <td>{row.order_number}</td><td>{row.order_line_number}</td><td>{row.material_code}</td><td>{row.customer_material_code}</td><td>{row.terminal_material_code}</td><td>{row.customer_po}</td><td>{row.material_name}</td>
+        {[row.ordered_quantity, row.delivered_quantity, row.pending_quantity, row.available_quantity, row.returnable_quantity].map((value, index) => <td className="numeric" key={index}>{quantity(value)}</td>)}
+        <td><input type="number" step="0.00000001" aria-label="本次送货数量" value={picked?.actual_quantity ?? ''} disabled={!picked || busy} onChange={event => update(row.sales_order_line, 'actual_quantity', event.target.value)} /></td>
+        <td><input type="number" step="0.00000001" aria-label="本次备品数" value={picked?.actual_spare_quantity ?? ''} disabled={!picked || busy} onChange={event => update(row.sales_order_line, 'actual_spare_quantity', event.target.value)} /></td>
+        <td className="numeric">{quantity(row.available_spare_quantity)}</td><td className="numeric">{quantity(row.returnable_spare_quantity)}</td><td>未同步</td>
+      </tr> })}
+      {!result.results.length && <tr><td colSpan={18} className="delivery-empty">{busy ? '查询中…' : '无符合条件的订单明细'}</td></tr>}
+    </tbody></table></div>
+    <div className="modal-foot"><span>共 {result.count} 行 · 第 {result.page} 页</span><button type="button" title="上一页" disabled={busy || result.page <= 1} onClick={() => query(result.page - 1)}><ChevronLeft size={16} /></button><button type="button" title="下一页" disabled={busy || result.page * 30 >= result.count} onClick={() => query(result.page + 1)}><ChevronRight size={16} /></button><button type="button" className="secondary" onClick={onClose}>关闭</button><button type="button" className="primary" disabled={busy || !Object.keys(selected).length} onClick={generate}><Check size={16} />生成</button></div>
+  </div></div>
+}
+
+export function DeliveryOrderModal({ token, lookups, record, onClose, onSave, onClearError, error = '', readOnly = false, loading = false }) {
+  const [values, setValues] = useState({ delivery_date: today(), delivery_mode: 'direct', document_type: 'normal', address_code: '0', ...(record || {}) })
+  const [lines, setLines] = useState(record?.lines || [])
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [confirmNumber, setConfirmNumber] = useState(false)
+  const [generator, setGenerator] = useState(false)
+  const [generatedCount, setGeneratedCount] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [localError, setLocalError] = useState('')
+  const requestId = useRef(crypto.randomUUID())
   const locations = lookups.locations || []
-  const materials = lookups.materials || []
-  const customers = lookups.customers || []
-  const addresses = lookups.customerAddresses || []
-  const [values, setValues] = useState({ delivery_date: today(), delivery_mode: 'direct', document_type: 'normal', ...(record || {}) })
-  const [lines, setLines] = useState(() => (record?.lines?.length ? record.lines.map(line => ({
-    ...line,
-    actual_quantity: record.document_type === 'normal' ? line.actual_quantity : Math.abs(Number(line.actual_quantity || 0)),
-    actual_spare_quantity: record.document_type === 'normal' ? line.actual_spare_quantity : Math.abs(Number(line.actual_spare_quantity || 0)),
-  })) : [{ ...EMPTY_LINE }]))
-  const locationOptions = useMemo(() => {
-    if (!values.source_location || locations.some(location => location.id === Number(values.source_location))) return locations
-    return [{ id: Number(values.source_location), code: record?.source_location_code || values.source_location, name: record?.source_location_name || '' }, ...locations]
-  }, [locations, record?.source_location_code, record?.source_location_name, values.source_location])
-  const availableLines = useMemo(() => orderLines.filter(line => {
-    if (!values.customer) return true
-    const order = orders.find(item => item.id === Number(line.order))
-    if (order && Number(order.customer) !== Number(values.customer)) return false
-    return values.document_type === 'return'
-      ? Number(line.delivered_quantity || 0) > 0
-      : Number(line.quantity || 0) > Number(line.delivered_quantity || 0)
-  }).sort((left, right) => Number(right.order) - Number(left.order) || Number(left.line_number) - Number(right.line_number)), [orderLines, orders, values.customer, values.document_type])
-  const lineOptions = useMemo(() => {
-    const selectedIds = new Set(lines.map(line => Number(line.sales_order_line)).filter(Boolean))
-    const availableIds = new Set(availableLines.map(line => line.id))
-    return orderLines.filter(line => selectedIds.has(line.id) || availableIds.has(line.id))
-      .sort((left, right) => Number(right.order) - Number(left.order) || Number(left.line_number) - Number(right.line_number))
-  }, [availableLines, lines, orderLines])
-  const addressOptions = useMemo(() => addresses.filter(address => !values.customer || Number(address.customer) === Number(values.customer)), [addresses, values.customer])
+  const addresses = (lookups.customerAddresses || []).filter(row => row.customer === Number(values.customer))
+  const locked = readOnly || record?.posted || record?.status === 'approved'
   const update = (key, value) => {
-    setValues(current => {
-      const next = { ...current, [key]: value }
-      if (key === 'customer') {
-        next.delivery_address = ''
-        next.address_code = ''
-        setLines(current => current.map(line => ({ ...line, sales_order_line: '' })))
-      }
-      if (key === 'address_code') {
-        const address = addressOptions.find(item => item.code === value)
-        next.delivery_address = address?.address || next.delivery_address || ''
-      }
-      if (key === 'source_location') {
-        setLines(currentLines => currentLines.map(line => line.source_location === current.source_location || !line.source_location ? { ...line, source_location: value } : line))
-      }
-      return next
-    })
+    setLocalError('')
+    setValues(current => ({ ...current, [key]: value, ...(key === 'customer' ? { address_code: '0', address_snapshot: '', delivery_address: '' } : {}) }))
+    if (key === 'customer') setLines([])
+    if (key === 'address_code') {
+      const address = addresses.find(row => row.code === value)
+      setValues(current => ({ ...current, address_snapshot: address?.address || '' }))
+    }
   }
-  const updateLine = (index, key, value) => setLines(current => current.map((line, lineIndex) => lineIndex === index ? { ...line, [key]: value } : line))
-  const selectLine = (index, value) => {
-    const source = lineOptions.find(line => line.id === Number(value))
-    if (!source) return updateLine(index, 'sales_order_line', value)
-    updateLine(index, 'sales_order_line', value)
-    const quantity = values.document_type === 'return'
-      ? Number(source.delivered_quantity || 0)
-      : Math.max(Number(source.quantity || 0) - Number(source.delivered_quantity || 0), 0)
-    setLines(current => current.map((line, lineIndex) => lineIndex === index ? { ...line, sales_order_line: value, actual_quantity: line.actual_quantity || String(quantity), source_location: line.source_location || values.source_location || materials.find(material => material.id === Number(source.material))?.default_location || '' } : line))
+  const openGenerator = () => {
+    setToolsOpen(false)
+    if (!values.customer) return setLocalError('请先选择客户')
+    if (!values.delivery_date) return setLocalError('请填写送货日期')
+    if (!values.delivery_address?.trim()) return setLocalError('请填写实际收货厂区')
+    if (record?.id || values.reservation) setGenerator(true)
+    else setConfirmNumber(true)
   }
-  const submit = event => {
+  const reserveNumber = async () => {
+    setBusy(true); setLocalError('')
+    try {
+      const reserved = await api('/delivery-order/reserve-number/', { token, method: 'POST', body: { request_id: requestId.current, delivery_date: values.delivery_date } })
+      setValues(current => ({ ...current, ...reserved }))
+      setConfirmNumber(false); setGenerator(true)
+    } catch (e) { setLocalError(e.message); setConfirmNumber(false) }
+    finally { setBusy(false) }
+  }
+  const submit = async event => {
     event.preventDefault()
-    const selected = lines.filter(line => line.sales_order_line && Number(line.actual_quantity || 0) !== 0).map((line, index) => ({ ...line, line_number: (index + 1) * 10 }))
-    onSave({ ...values, document_type: values.document_type, lines: selected })
+    if (busy || locked) return
+    if (!lines.length) return setLocalError('请先根据客户订单生成明细')
+    if (!record?.id && !values.reservation) return setLocalError('请先取得正式单号')
+    setBusy(true); setLocalError('')
+    try { await onSave({ ...values, lines }) }
+    catch (e) { setLocalError(e.message) }
+    finally { setBusy(false) }
   }
-  const readOnlyInput = (value, className = 'delivery-readonly') => <input className={className} readOnly value={value ?? ''} />
-  return <div className="modal-backdrop"><form className="modal delivery-order-modal" onSubmit={submit}>
-    <div className="modal-head delivery-modal-head"><div><div className="order-kicker">销售管理 / 送货单</div><h2>{record ? '送货单' : '新增送货单'}</h2></div><div className="order-head-meta"><span className={`status ${record?.status === 'approved' ? 'green' : 'orange'}`}><i />{record?.status === 'approved' ? '已审核' : '草稿'}</span><button type="button" aria-label="关闭" onClick={onClose}><X size={19} /></button></div></div>
-    {showErrorInModal && error ? <div className="error-banner delivery-modal-error" role="alert">{error}<button type="button" aria-label="关闭错误" onClick={onClearError}><X size={15} /></button></div> : null}
-    <div className="erp-toolbar" aria-label="送货单工具栏"><button type="button" title="查询"><Search size={15} />查询</button><button type="button" title="新增"><Plus size={15} />新增</button><button type="submit" title="保存" disabled={readOnly}><Save size={15} />保存</button><button type="button" title="取消" onClick={onClose}><RotateCcw size={15} />取消</button><button type="button" title="删除"><Trash2 size={15} />删除</button><button type="button" title="审核"><FileCheck size={15} />审核</button><button type="button" title="预览"><Eye size={15} />预览</button><button type="button" title="打印"><Printer size={15} />打印</button><button type="button" title="页面设置"><Settings size={15} />页面设置</button><button type="button" title="工具"><Wrench size={15} />工具</button><span className="erp-toolbar-spacer" /><button type="button" title="上一笔"><ChevronLeft size={15} /></button><button type="button" title="下一笔"><ChevronRight size={15} /></button><button type="button" title="第一笔"><ChevronsLeft size={15} /></button><button type="button" title="末一笔"><ChevronsRight size={15} /></button></div>
-    <div className="delivery-summary"><div><span>客户</span><strong>{optionLabel(customers, values.customer) || '待选择'}</strong></div><div><span>明细行</span><strong>{lines.filter(line => line.sales_order_line).length} 行</strong></div><div><span>单据类型</span><strong>{({ normal: '正常送货', return: '正常退货', red_flush: '红冲单据' })[values.document_type] || '正常送货'}</strong></div><div><span>数据状态</span><strong className="summary-ok">可保存</strong></div></div>
-    <section className="delivery-section"><div className="section-title"><h3>送货单表头</h3><span>按客户端 ERP 栏头维护送货日期、客户、地址及送货方式</span></div><div className="delivery-header-grid">
-      <label><span>送货单号</span>{readOnlyInput(values.number || '保存后生成')}</label><label><span>日期<em>*</em></span><input required type="date" value={values.delivery_date || today()} onChange={event => update('delivery_date', event.target.value)} disabled={readOnly} /></label><label><span>客户代码<em>*</em></span><CodeLookup id="delivery-customer" label="客户代码" required value={values.customer} options={customers} onChange={value => update('customer', value)} disabled={readOnly} /></label><label><span>单据类型<em>*</em></span><select required value={values.document_type || 'normal'} onChange={event => update('document_type', event.target.value)} disabled={readOnly}><option value="normal">1. 正常送货</option><option value="return">2. 正常退货</option><option value="red_flush">3. 红冲单据</option></select></label>
-      <label><span>送货模式<em>*</em></span><select required value={values.delivery_mode || 'direct'} onChange={event => update('delivery_mode', event.target.value)} disabled={readOnly}><option value="direct">直送</option><option value="supplier">供应商代送</option></select></label><label><span>客户地址代码<em>*</em></span><AddressLookup required value={values.address_code || ''} options={addressOptions} onChange={value => update('address_code', value)} disabled={readOnly} /></label><label className="field-wide"><span>详细地址<em>*</em></span><input required value={values.delivery_address || ''} onChange={event => update('delivery_address', event.target.value)} disabled={readOnly} /></label><label><span>出库库位<em>*</em></span><CodeLookup id="delivery-location" label="出库库位" required value={values.source_location} options={locationOptions} onChange={value => update('source_location', value)} disabled={readOnly} /></label><label><span>SRM 系统单号</span><input value={values.srm_number || ''} onChange={event => update('srm_number', event.target.value)} disabled={readOnly} /></label><label className="field-wide"><span>备注</span><textarea value={values.notes || ''} onChange={event => update('notes', event.target.value)} disabled={readOnly} /></label>
-    </div></section>
-    <section className="delivery-section delivery-lines-section"><div className="order-section-head"><div className="section-title"><h3>送货明细</h3><span>{loading ? '正在加载订单与物料资料…' : '订单、物料、客户 PO 等字段自动带入；数量、库位、批号和备注可编辑'}</span></div><button type="button" className="secondary" onClick={() => setLines(current => [...current, { ...EMPTY_LINE, source_location: values.source_location || '' }])} disabled={readOnly || loading}><Plus size={15} />新增明细</button></div><div className="delivery-lines-wrap"><table className="delivery-lines"><thead><tr>{['行号', '客户订单', '订单行号', '物料编码', '物料名称', '物料规格', '客户物料编码', '客户物料名称', '客户物料规格', '客户物料备注', '终端客户代码', '终端客户名称', '客户 PO', '退货类型', '出库库位', '库位名称', '批号', '送货数量', '送备品数', '销售单位', '销售单价', '送货金额', '币种', '税率', '备注', '订购数量', '备品数量', '已送数量', '已送备品数', '单位转换率(分子)', '单位转换率(分母)', '库存单位', '客户订单备注', '录入人', '录入时间', '修改次数', '最后修改人', '最后修改时间', '操作'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{lines.map((line, index) => { const source = orderLines.find(item => item.id === Number(line.sales_order_line)) || line; const material = materials.find(item => item.id === Number(source?.material)); const customerMaterial = (lookups.customerMaterials || []).find(item => item.id === Number(source?.customer_material)); const order = orders.find(item => item.id === Number(source?.order)); const location = locations.find(item => item.id === Number(line.source_location || values.source_location)) || { code: line.source_location_code, name: line.source_location_name }; const amount = Number(line.actual_quantity || 0) * Number(source?.unit_price || 0); const options = readOnly ? [source] : lineOptions; return <tr key={line.id || index}><td>{readOnlyInput(line.line_number || (index + 1) * 10)}</td><td><select required value={line.sales_order_line || ''} onChange={event => selectLine(index, event.target.value)} disabled={readOnly || loading}><option value="">请选择</option>{options.map(item => <option key={item.id || item.sales_order_line} value={item.sales_order_line || item.id}>{item.order_number || optionLabel(orders, item.order)} / 行{item.order_line_number || item.line_number} / {item.material_code || `物料#${item.material}`} / 已送{item.delivered_quantity || 0}</option>)}</select></td><td>{readOnlyInput(source?.order_line_number || source?.line_number)}</td><td>{readOnlyInput(material?.code || source?.material_code)}</td><td>{readOnlyInput(material?.name || source?.material_name)}</td><td>{readOnlyInput(material?.specification || source?.material_specification)}</td><td>{readOnlyInput(customerMaterial?.customer_code || source?.customer_material_code)}</td><td>{readOnlyInput(source?.customer_material_name || customerMaterial?.customer_name)}</td><td>{readOnlyInput(source?.customer_material_specification || customerMaterial?.customer_specification)}</td><td>{readOnlyInput(source?.customer_material_notes || customerMaterial?.notes)}</td><td>{readOnlyInput(source?.terminal_customer_code || customerMaterial?.terminal_customer_code)}</td><td>{readOnlyInput(source?.terminal_customer_name || customerMaterial?.terminal_customer_name)}</td><td>{readOnlyInput(order?.customer_po || source?.customer_po)}</td><td>{readOnlyInput(({ normal: '正常送货', return: '正常退货', red_flush: '红冲单据' })[values.document_type] || '正常送货')}</td><td><select required value={line.source_location || values.source_location || ''} onChange={event => updateLine(index, 'source_location', event.target.value)} disabled={readOnly || loading}><option value="">请选择</option>{(readOnly && location ? [{ id: line.source_location || values.source_location, code: location.code }] : locations).map(item => <option key={item.id} value={item.id}>{item.code}</option>)}</select></td><td>{readOnlyInput(location?.name)}</td><td><input value={line.batch_number || ''} onChange={event => updateLine(index, 'batch_number', event.target.value)} disabled={readOnly} /></td><td><input required type="number" step="any" value={line.actual_quantity || ''} onChange={event => updateLine(index, 'actual_quantity', event.target.value)} disabled={readOnly} /></td><td><input type="number" min="0" step="any" value={line.actual_spare_quantity ?? 0} onChange={event => updateLine(index, 'actual_spare_quantity', event.target.value)} disabled={readOnly} /></td><td>{readOnlyInput(source?.uom_code)}</td><td>{readOnlyInput(source?.unit_price ?? 0)}</td><td>{readOnlyInput(amount.toFixed(2))}</td><td>{readOnlyInput(source?.currency_code)}</td><td>{readOnlyInput(source?.tax_rate ?? 0)}</td><td><input value={line.notes || ''} onChange={event => updateLine(index, 'notes', event.target.value)} disabled={readOnly} /></td><td>{readOnlyInput(source?.ordered_quantity || source?.quantity)}</td><td>{readOnlyInput(source?.spare_quantity ?? 0)}</td><td>{readOnlyInput(source?.delivered_quantity ?? 0)}</td><td>{readOnlyInput(source?.delivered_spare_quantity ?? 0)}</td><td>{readOnlyInput(source?.uom_rate_m ?? 1)}</td><td>{readOnlyInput(source?.uom_rate_d ?? 1)}</td><td>{readOnlyInput(source?.inventory_uom_code)}</td><td>{readOnlyInput(source?.order_notes || order?.notes)}</td><td>{readOnlyInput(source?.line_created_by || source?.created_by)}</td><td>{readOnlyInput(source?.line_created_at || source?.created_at)}</td><td>{readOnlyInput(source?.line_modification_count ?? source?.modification_count ?? 0)}</td><td>{readOnlyInput(source?.line_updated_by || source?.updated_by)}</td><td>{readOnlyInput(source?.line_updated_at || source?.updated_at)}</td><td><button type="button" title="删除明细" aria-label="删除明细" onClick={() => setLines(current => current.length > 1 ? current.filter((_, lineIndex) => lineIndex !== index) : [{ ...EMPTY_LINE }])} disabled={readOnly || loading}><Trash2 size={15} /></button></td></tr> })}</tbody></table></div></section>
-    <div className="modal-foot"><span className="order-foot-note">保存后可从列表提交审核；当前阶段不写入库存</span><button className="secondary" type="button" onClick={onClose}>取消</button><button className="primary" type="submit" disabled={readOnly}><Check size={16} />保存草稿</button></div>
-  </form></div>
+  const editLine = (index, key, value) => setLines(current => current.map((row, i) => i === index ? { ...row, [key]: value } : row))
+  const close = () => { if (!busy) onClose() }
+  return <>
+    <div className="modal-backdrop"><form className="modal delivery-order-modal delivery-sheet" onSubmit={submit} aria-label="送货单编辑">
+      <div className="modal-head"><div><h2>{record ? '送货单' : '新增送货单'}</h2><span>{values.number || '未取号'}</span></div><div className="order-head-meta"><span className={'status ' + (locked ? 'green' : 'orange')}>{locked ? '已审核' : '草稿'}</span><button type="button" aria-label="关闭送货单" onClick={close} disabled={busy}><X size={19} /></button></div></div>
+      <div className="erp-toolbar"><button type="submit" title="保存" disabled={locked || busy}><Save size={16} />保存</button><button type="button" title="取消" disabled={busy} onClick={close}><RotateCcw size={16} />取消</button><div className="delivery-tools"><button type="button" title="工具" disabled={locked || busy} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}><Wrench size={16} />工具</button>{toolsOpen && <div className="delivery-tools-menu"><button type="button" onClick={openGenerator}>根据客户订单生成明细</button></div>}</div></div>
+      {(localError || error) && <div className="error-banner" role="alert">{localError || error}<button type="button" aria-label="关闭错误" onClick={() => { setLocalError(''); onClearError?.() }}><X size={15} /></button></div>}
+      <section className="delivery-header-grid">
+        <label><span>送货单号</span><input readOnly value={values.number || ''} /></label>
+        <label><span>送货日期 <em>*</em></span><input type="date" required value={values.delivery_date} disabled={locked || busy} onChange={event => update('delivery_date', event.target.value)} /></label>
+        <label><span>客户代码 <em>*</em></span><CodeLookup id="delivery-customer" label="客户代码" required value={values.customer} options={lookups.customers || []} onChange={value => update('customer', value)} disabled={locked || busy || lines.length > 0} /></label>
+        <label><span>客户地址代码</span><AddressLookup value={values.address_code || ''} options={addresses} onChange={value => update('address_code', value)} disabled={locked || busy} /></label>
+        <label><span>送货模式</span><select value={values.delivery_mode} disabled={locked || busy} onChange={event => update('delivery_mode', event.target.value)}><option value="direct">1. 直送</option><option value="supplier">2. 供应商代送</option></select></label>
+        <label><span>业务模式</span><select value={values.document_type} disabled={locked || busy} onChange={event => update('document_type', event.target.value)}><option value="normal">正常送货</option><option value="return">正常退货</option><option value="red_flush">红冲单据</option></select></label>
+        <label><span>SRM 系统单号</span><input maxLength={80} value={values.srm_number || ''} disabled={locked || busy} onChange={event => update('srm_number', event.target.value)} /></label>
+        <label><span>默认打印人</span><input maxLength={64} value={values.default_print_person || ''} disabled={locked || busy} onChange={event => update('default_print_person', event.target.value)} /></label>
+        <label className="field-wide"><span>送货地址 / 实际收货厂区 <em>*</em></span><input required maxLength={240} value={values.delivery_address || ''} disabled={locked || busy} onChange={event => update('delivery_address', event.target.value)} /></label>
+        <label className="field-wide"><span>客户资料详细地址</span><input readOnly value={values.address_snapshot || ''} /></label>
+        <label className="field-wide"><span>单头备注</span><input maxLength={240} value={values.notes || ''} disabled={locked || busy} onChange={event => update('notes', event.target.value)} /></label>
+      </section>
+      <section className="delivery-sheet-details"><div className="order-section-head"><h3>送货明细 <small>{lines.length} 行</small></h3><button type="button" className="secondary" onClick={openGenerator} disabled={locked || busy}><Plus size={15} />根据客户订单生成</button></div>
+      <div className="delivery-lines-wrap"><table className="delivery-lines"><thead><tr>{['行号', '客户订单', '订单行号', '物料编码', '本次送货数量', '本次备品数', '出库库位', '库位名称', '批号', '明细备注', ...DISPLAY_COLUMNS.map(column => column[1]), '操作'].map(label => <th key={label}>{label}</th>)}</tr></thead><tbody>{lines.map((line, index) => {
+        const location = locations.find(row => row.id === Number(line.source_location))
+        return <tr key={line.id || index}>
+          <td>{line.line_number || (index + 1) * 10}</td><td>{line.order_number}</td><td>{line.order_line_number}</td><td>{line.material_code}</td>
+          <td><input type="number" step="0.00000001" aria-label={'送货数量行' + (index + 1)} value={line.actual_quantity ?? ''} disabled={locked || busy} onChange={event => editLine(index, 'actual_quantity', event.target.value)} /></td>
+          <td><input type="number" step="0.00000001" aria-label={'备品数行' + (index + 1)} value={line.actual_spare_quantity ?? '0'} disabled={locked || busy} onChange={event => editLine(index, 'actual_spare_quantity', event.target.value)} /></td>
+          <td><select required aria-label={'出库库位行' + (index + 1)} value={line.source_location || ''} disabled={locked || busy || loading} onChange={event => editLine(index, 'source_location', event.target.value)}><option value="">请选择</option>{!location && line.source_location && <option value={line.source_location}>{line.source_location_code || line.source_location}</option>}{locations.filter(row => !row.disabled_for_inventory || row.id === Number(line.source_location)).map(row => <option key={row.id} value={row.id}>{row.code} {row.source_site || ''}</option>)}</select></td>
+          <td>{location?.name || line.source_location_name}</td>
+          <td><input aria-label={'批号行' + (index + 1)} value={line.batch_number || ''} maxLength={80} disabled={locked || busy} onChange={event => editLine(index, 'batch_number', event.target.value)} /></td>
+          <td><input aria-label={'备注行' + (index + 1)} value={line.notes || ''} maxLength={240} disabled={locked || busy} onChange={event => editLine(index, 'notes', event.target.value)} /></td>
+          {DISPLAY_COLUMNS.map(([key]) => <td key={key}>{key === 'delivery_amount' ? (Number(line.actual_quantity || 0) * Number(line.unit_price || 0)).toFixed(2) : key === 'physical_quantity' ? quantity(Number(line.actual_quantity || 0) + Number(line.actual_spare_quantity || 0)) : line[key] ?? ''}</td>)}
+          <td><button type="button" title="拆分库位或批号" disabled={locked || busy} onClick={() => setLines(current => [...current, { ...line, id: undefined, line_number: undefined, actual_quantity: '0', actual_spare_quantity: '0', source_location: '', batch_number: '' }])}><Copy size={15} /></button><button type="button" title="删除明细" disabled={locked || busy} onClick={() => setLines(current => current.filter((_, i) => i !== index))}><Trash2 size={15} /></button></td>
+        </tr>
+      })}{!lines.length && <tr><td colSpan={29} className="delivery-empty">暂无明细</td></tr>}</tbody></table></div></section>
+      <div className="modal-foot"><span>{values.created_by ? '录入人：' + values.created_by : ''}</span><button type="button" className="secondary" onClick={close} disabled={busy}>关闭</button><button type="submit" className="primary" disabled={locked || busy}><Save size={16} />{busy ? '保存中…' : '保存'}</button></div>
+    </form></div>
+    {confirmNumber && <div className="modal-backdrop delivery-overlay"><div className="modal delivery-confirm" role="dialog" aria-modal="true" aria-label="生成新单号"><div className="modal-head"><h2>是否自动生成新单号？</h2></div><div className="modal-foot"><button type="button" onClick={() => setConfirmNumber(false)} disabled={busy}>否</button><button type="button" className="primary" onClick={reserveNumber} disabled={busy}>是</button></div></div></div>}
+    {generator && <OrderGenerator token={token} customer={values.customer} delivery={record?.id} documentType={values.document_type} existing={lines} onClose={() => setGenerator(false)} onGenerate={rows => { setLines(current => [...current, ...rows]); setGenerator(false); setGeneratedCount(rows.length) }} />}
+    {generatedCount !== null && <div className="modal-backdrop delivery-overlay"><div className="modal delivery-confirm" role="dialog" aria-modal="true" aria-label="生成完成"><div className="modal-head"><h2>生成完成，共添加 {generatedCount} 行明细</h2></div><div className="modal-foot"><button type="button" className="primary" onClick={() => setGeneratedCount(null)}>确定</button></div></div></div>}
+  </>
 }

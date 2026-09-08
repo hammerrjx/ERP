@@ -12,9 +12,10 @@ npm run dev
 在另一个终端启动后端：
 
 ```powershell
-python backend\manage.py migrate
-python backend\manage.py createsuperuser
-python backend\manage.py runserver
+uv sync
+uv run python backend\manage.py migrate
+uv run python backend\manage.py createsuperuser
+uv run python backend\manage.py runserver
 ```
 
 然后打开 `http://localhost:5173`。新增可审核单据先保存为草稿，再从列表提交和审核；菜单、按钮和 API 同时按角色权限控制。
@@ -47,35 +48,22 @@ python backend\manage.py import_legacy_access --replace
 ## 字段来源
 
 附件中的操作指南提取了“物料信息”“供应商资料”“客户资料”及其必填项、审核、联系人、税务编码、单位、产品类、默认库位、支付方式等字段。原始附件位于用户桌面的 `ERP操作路线` 文件夹。
-# ERP
+## 项目结构
 
-ERP application with a Vite/React frontend and Django REST backend.
+- `backend/domain/`：基础资料、组织、工程、销售、送货、采购和库存模型；`backend/models.py`保留统一导入入口。
+- `backend/master_data/serializers/`：按业务模块组织的校验与API数据表示，公共验证在`common.py`。
+- `backend/master_data/*_views.py`：按模块组织的HTTP接口；`api_common.py`管理公共审批与权限行为。
+- `src/modules/`：业务页面和专用弹窗；订单编辑与详情共用`sales/salesOrderFields.js`字段定义。
+- `src/components/`：通用表单控件、表格及跨模块弹窗；`src/app/`只负责应用导航、加载与页面协调。
+- `tools/`：检查与维护脚本；`tmp/`、`outputs/`存放本地运行结果。
 
-## Development setup
+历史对话生成的计划、调查和报告保存在`mymd/`、`docs/`、`backend/docs/`，由Git忽略。本地数据库、环境变量和媒体同样不提交；模块README与`backend/architecture.md`作为项目维护文档保留。
 
-Install Python and [uv](https://docs.astral.sh/uv/), then run from the repository root:
-
-```powershell
-uv sync
-uv run python backend/manage.py migrate
-uv run python backend/manage.py runserver
-```
-
-In a second terminal, install Node.js dependencies and start the frontend:
+## 验证
 
 ```powershell
-npm install
-npm run dev
+uv run python backend/manage.py check
+uv run python backend/manage.py makemigrations --check --dry-run
+uv run python backend/manage.py test backend --noinput
+npm run build
 ```
-
-`uv.lock` is committed so collaborators receive the same Python dependency
-resolution. Local databases, uploaded media, generated reports, build output,
-temporary inspection files, and environment files are intentionally ignored by
-Git. Copy `.env.example` to `.env` and fill in local settings when needed.
-
-## Project layout
-
-- `backend/`: Django project, domain services, API views, imports, migrations, and tests.
-- `src/`: React application, shared components, API client, and business modules.
-- `docs/`: architecture and data mapping documentation.
-- `tools/`: one-off inspection and maintenance scripts.
