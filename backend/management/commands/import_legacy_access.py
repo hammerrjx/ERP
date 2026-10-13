@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from backend.models import ApprovalStatus, Department, Role, UserRole
+from backend.models import ApprovalStatus, Department, Employee, Role, UserEmployeeLink, UserRole
 
 
 PROGRAM_RESOURCES = {
@@ -178,6 +178,9 @@ class Command(BaseCommand):
             if created:
                 user.set_unusable_password()
                 user.save(update_fields=["password"])
+            employee = Employee.objects.filter(code=username).first()
+            if employee and not UserEmployeeLink.objects.filter(user=user).exists() and not UserEmployeeLink.objects.filter(employee=employee).exists():
+                UserEmployeeLink.objects.create(user=user, employee=employee)
             UserRole.objects.update_or_create(user=user, role=role, department=department, defaults={
                 "is_primary": True, "active": True,
             })

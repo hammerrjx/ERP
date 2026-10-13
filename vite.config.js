@@ -7,10 +7,10 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       host: '0.0.0.0',
-      port: 5173,
+      port: mode === 'cutoff' ? 5186 : 5173,
       strictPort: true,
       allowedHosts: true,
-      proxy: { '/api': env.VITE_API_TARGET || 'http://127.0.0.1:8000' },
+      proxy: { '/api': { target: mode === 'cutoff' ? 'http://127.0.0.1:8021' : env.VITE_API_TARGET || 'http://127.0.0.1:8000', changeOrigin: true } },
     },
   }
 })

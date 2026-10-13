@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { today } from '../shared/presentation.js'
+import { today } from '../../src/shared/presentation.js'
 
 test('business dates use Shanghai midnight, including year boundaries', context => {
   const RealDate = Date

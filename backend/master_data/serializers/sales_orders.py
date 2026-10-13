@@ -1,5 +1,6 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import Max
 from rest_framework import serializers
 
 from backend.models import Partner, SalesOrder, SalesOrderLine
@@ -8,6 +9,7 @@ from .common import BaseSerializer
 
 
 SALES_ORDER_LINE_READ_ONLY_FIELDS = (
+    "line_number",
     "delivered_quantity",
     "customer_material_name",
     "customer_material_specification",
@@ -60,6 +62,11 @@ def clean_sales_order(instance):
 
 
 class SalesOrderLineInputSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False, min_value=1)
+    material_code = serializers.CharField(source="material.code", read_only=True)
+    customer_material_code = serializers.CharField(source="customer_material.customer_code", read_only=True, default="")
+    uom_code = serializers.CharField(source="uom.code", read_only=True)
+    inventory_uom_code = serializers.CharField(source="inventory_uom.code", read_only=True, default="")
     execution_summary = serializers.SerializerMethodField()
 
     def get_execution_summary(self, obj):
@@ -137,6 +144,15 @@ class SalesOrderSerializer(BaseSerializer):
         order_type = attrs.get("order_type", getattr(self.instance, "order_type", SalesOrder.OrderType.FORMAL))
         if order_type not in {SalesOrder.OrderType.FORMAL, SalesOrder.OrderType.SAMPLE}:
             raise serializers.ValidationError({"order_type": "单别只能选择正式订单或样品订单"})
+        if self.instance is None or any(
+            key in attrs and attrs[key] != getattr(self.instance, key)
+            for key in ("currency", "order_date")
+        ):
+            from backend.currencies import exchange_rate
+            from django.utils import timezone
+            currency = attrs.get("currency") or getattr(self.instance, "currency", None)
+            if currency:
+                attrs["exchange_rate"] = exchange_rate(currency, attrs.get("order_date", getattr(self.instance, "order_date", timezone.localdate())))
         lines = attrs.get("lines")
         if lines is not None:
             if not lines:
@@ -186,18 +202,22 @@ class SalesOrderSerializer(BaseSerializer):
 
     @staticmethod
     def _replace_lines(order, lines):
-        previous = {line.line_number: line for line in order.lines.select_for_update()}
-        numbers = [data.get("line_number") or index * 10 for index, data in enumerate(lines, 1)]
-        if len(numbers) != len(set(numbers)):
-            raise serializers.ValidationError({"lines": "订单行号不能重复"})
-        removed = order.lines.exclude(line_number__in=numbers)
+        previous = {line.pk: line for line in order.lines.select_for_update()}
+        ids = [data["id"] for data in lines if "id" in data]
+        if len(ids) != len(set(ids)) or set(ids) - previous.keys():
+            raise serializers.ValidationError({"lines": "订单明细ID重复或不属于当前订单"})
+        next_number = max((line.line_number for line in previous.values()), default=0)
+        removed = order.lines.exclude(pk__in=ids)
         if removed.filter(delivery_lines__isnull=False).exists():
             raise serializers.ValidationError({"lines": "已有送货引用的订单行不能删除或重编号"})
         removed.delete()
-        for index, data in enumerate(lines, 1):
+        for data in lines:
             data = dict(data)
+            line = previous.get(data.pop("id", None))
+            if line is None:
+                next_number += 10
+                line = SalesOrderLine(line_number=next_number, created_by=order.created_by)
             data["order"] = order
-            data["line_number"] = data.get("line_number") or index * 10
             customer_material = data.get("customer_material")
             if not data.get("uom"):
                 data["uom"] = (
@@ -205,7 +225,6 @@ class SalesOrderSerializer(BaseSerializer):
                     if customer_material and customer_material.customer_uom_id
                     else data["material"].uom
                 )
-            line = previous.get(data["line_number"]) or SalesOrderLine(created_by=order.created_by)
             for name, value in data.items():
                 setattr(line, name, value)
             if line.pk:
@@ -311,7 +330,14 @@ class SalesOrderLineSerializer(serializers.ModelSerializer):
     def get_remaining_quantity(self, obj):
         return max(obj.quantity - obj.delivered_quantity, 0)
 
+    @transaction.atomic
     def create(self, validated_data):
+        from ..api_common import ensure_editable
+
+        order = SalesOrder.objects.select_for_update().get(pk=validated_data["order"].pk)
+        ensure_editable(order)
+        validated_data["order"] = order
+        validated_data["line_number"] = (order.lines.aggregate(number=Max("line_number"))["number"] or 0) + 10
         line = SalesOrderLine(**validated_data)
         line.created_by = self.context.get("request").user.get_username() if self.context.get("request") else ""
         line.sync_derived_values()
@@ -321,6 +347,7 @@ class SalesOrderLineSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        SalesOrder.objects.select_for_update().get(pk=instance.order_id)
         instance = SalesOrderLine.objects.select_for_update().get(pk=instance.pk)
         from ..api_common import ensure_editable
 

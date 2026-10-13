@@ -46,7 +46,8 @@ class PayableVoucher(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"AP-{timezone.now():%Y%m%d%H%M%S%f}"
+            from .document_numbers import next_document_number
+            self.number = next_document_number('MYAP', self.voucher_date, 'PayableVoucher')
         super().save(*args, **kwargs)
 
 
@@ -69,8 +70,8 @@ class PayableVoucherLine(models.Model):
     )
     material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="payable_voucher_lines")
     uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="payable_voucher_lines")
-    quantity = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0.000001"))])
-    unit_price = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0"))])
+    quantity = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0.000001"))])
+    unit_price = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
     net_amount = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"), editable=False)
     tax_amount = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"), editable=False)
     gross_amount = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0"), editable=False)
@@ -118,5 +119,11 @@ class PayableVoucherLine(models.Model):
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
         self.gross_amount = self.net_amount + self.tax_amount
+        source = self.source_receipt_line if self.source_receipt_line_id else self.source_purchase_return_line
+        if source.purchase_order_line.snapshot.get('price_includes_tax'):
+            net_price = (self.unit_price / (1 + self.voucher.tax_rate / 100)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+            self.net_amount = (sign * self.quantity * net_price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            self.gross_amount = (sign * self.quantity * self.unit_price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            self.tax_amount = self.gross_amount - self.net_amount
         super().save(*args, **kwargs)
         self.voucher.recalculate()

@@ -223,6 +223,10 @@ def save_sheet(data, actor, instance=None, reservation=None):
     header["customer_po"] = next(iter(pos)) if len(pos) == 1 else ""
     serializer = DeliveryOrderSerializer(instance=instance, data=header, partial=bool(instance))
     serializer.is_valid(raise_exception=True)
+    if reservation:
+        day = serializer.validated_data.get("delivery_date", reservation.delivery_date)
+        if day.strftime("%Y%m") != reservation.delivery_date.strftime("%Y%m"):
+            raise ApiValidationError({"delivery_date": "送货日期与取号月份不一致，请按送货日期重新取号"})
     save_args = {"updated_by" if instance else "created_by": actor.get_username()}
     if reservation:
         save_args["number"] = reservation.number

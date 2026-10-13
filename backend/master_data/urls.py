@@ -5,7 +5,10 @@ from . import views
 from backend.importing.views import MaterialImportConfirmView, MaterialImportDetailView, MaterialImportPreviewView
 
 router = DefaultRouter()
+router.register('no-order-return', views.NoOrderReturnViewSet, basename='no-order-return')
+router.register('trade-mrp', views.TradeMrpViewSet, basename='trade-mrp')
 for resource in (
+    "accounting_account",
     "business_group", "company", "currency", "currency_rate", "customer_material", "customer_address", "document_evidence", "location",
     "material", "material_company", "material_uom_conversion", "partner", "payment_method", "tax_code",
     "partner_bank_account", "partner_company", "partner_contact", "product_category",
@@ -17,9 +20,14 @@ for resource in (
     "purchase_order", "purchase_order_line", "goods_receipt", "goods_receipt_line",
     "payable_voucher", "payable_voucher_line",
     "stock_balance", "stock_transaction", "delivery_order", "delivery_order_line",
+    "inventory_document", "inventory_dictionary", "legacy_inventory_record",
+    "inventory_report",
+    "material_inventory_batch", "material_monthly_inventory",
     "stock_transfer", "stock_transfer_line", "stock_count", "stock_count_line",
     "inventory_alert", "purchase_return", "purchase_return_line", "sales_return",
     "sales_return_line",
+    "material_inventory_detail", "material_movement_detail", "transfer_detail", "count_result",
+    "unplanned_receipt_detail", "unplanned_issue_detail", "scrap_detail",
 ):
     prefix = resource.replace("_", "-")
     router.register(prefix, getattr(views, "".join(part.title() for part in resource.split("_")) + "ViewSet"), basename=prefix)

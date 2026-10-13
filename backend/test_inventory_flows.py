@@ -25,7 +25,7 @@ class InventoryFlowApiTests(CoreFlowSupport, APITestCase):
         self.approve("purchase-order", order["id"])
         receipt = self.post("goods-receipt", {
             "supplier": supplier["id"], "purchase_order": order["id"],
-            "receipt_date": "2026-08-27", "receipt_type": "normal",
+            "receipt_date": "2026-08-27", "receipt_type": "normal", "supplier_delivery_number": "DN-TEST",
         })
         receipt_line = self.post("goods-receipt-line", {
             "receipt": receipt["id"], "line_number": 10, "purchase_order_line": order_line["id"],
@@ -35,12 +35,12 @@ class InventoryFlowApiTests(CoreFlowSupport, APITestCase):
         self.approve("goods-receipt", receipt["id"])
         balances = self.client.get("/api/stock-balance/")
         self.assertEqual(balances.status_code, 200, balances.data)
-        self.assertEqual(balances.data[0]["quantity"], "6.000000")
+        self.assertEqual(balances.data[0]["quantity"], "6.00000000")
         ledger = self.client.get("/api/stock-transaction/")
         self.assertEqual(ledger.status_code, 200, ledger.data)
-        self.assertEqual(ledger.data[0]["source_line_id"], str(receipt_line["id"]))
+        self.assertEqual(ledger.data[0]["source_line_id"], str(receipt_line["id"]) + ":1")
         refreshed_line = self.client.get(f"/api/purchase-order-line/{order_line['id']}/")
-        self.assertEqual(refreshed_line.data["received_quantity"], "6.000000")
+        self.assertEqual(refreshed_line.data["received_quantity"], "6.00000000")
 
     def test_transfer_count_and_shortage_alert_share_the_stock_ledger(self):
         context = self.base_context()
@@ -76,8 +76,8 @@ class InventoryFlowApiTests(CoreFlowSupport, APITestCase):
         self.approve("stock-count", count["id"])
         balances = self.client.get("/api/stock-balance/").data
         by_location = {row["location"]: row["quantity"] for row in balances}
-        self.assertEqual(by_location[context["location"]["id"]], "6.000000")
-        self.assertEqual(by_location[destination["id"]], "3.000000")
+        self.assertEqual(by_location[context["location"]["id"]], "6.00000000")
+        self.assertEqual(by_location[destination["id"]], "3.00000000")
         alerts = self.client.get("/api/inventory-alert/")
         self.assertEqual(alerts.status_code, 200, alerts.data)
         alert = next(row for row in alerts.data if row["location"] == destination["id"])

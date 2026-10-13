@@ -13,6 +13,7 @@ from .base import ApprovalStatus, AuditedModel, AuditEvent
 from .inventory import StockBalance
 from .master_data import CustomerAddress, Partner
 from .sales import SalesOrder, SalesOrderLine
+from backend.inventory_codes import SALES_DELIVERY, SALES_RETURN
 
 
 class DeliveryOrderSequence(models.Model):
@@ -49,6 +50,8 @@ class DeliveryNumberReservation(models.Model):
 
 
 class DeliveryOrder(AuditedModel):
+    stock_posted = models.BooleanField(default=False, editable=False)
+    posting_version = models.PositiveIntegerField(default=0, editable=False)
     class DocumentType(models.TextChoices):
         NORMAL = "normal", "正常送货"
         RETURN = "return", "正常退货"
@@ -103,6 +106,10 @@ class DeliveryOrder(AuditedModel):
 
     def approve(self, actor):
         from backend.delivery import validate_quantities
+        from backend.live_inventory import live_batch
+
+        local_ledger = live_batch()
+        post_stock = bool(local_ledger) or getattr(settings, "ERP_DELIVERY_POST_STOCK", False)
 
         lines = list(
             self.lines.select_related(
@@ -134,15 +141,21 @@ class DeliveryOrder(AuditedModel):
             line.full_clean()
             if line.sales_order_line.order.status != ApprovalStatus.APPROVED:
                 raise ValidationError("销售订单审核通过后才能送货")
+        if post_stock and self.delivery_mode != SalesOrder.DeliveryMode.DIRECT:
+            raise ValidationError("当前本地库存账尚未启用供应商代送，请使用已核实的直送流程")
         super().approve(actor)
         if self.posted:
             return
+        if local_ledger:
+            self.posting_version += 1
         for line in lines:
             order_line = line.sales_order_line
             quantity_delta = line.actual_quantity
             spare_delta = line.actual_spare_quantity
             stock_delta = -(quantity_delta + spare_delta)
-            movement_type = "sales_delivery" if stock_delta < 0 else "sales_return"
+            # dgyzx1: normal delivery detail is positive, but tr_hist 260 is negative;
+            # a negative return detail posts the same 260 code with positive stock qty.
+            movement_type = SALES_DELIVERY
             order_line.delivered_quantity = max(order_line.delivered_quantity + quantity_delta, Decimal("0"))
             order_line.delivered_spare_quantity = max(order_line.delivered_spare_quantity + spare_delta, Decimal("0"))
             if (quantity_delta < 0 or spare_delta < 0) and order_line.line_status in ("C", "closed"):
@@ -159,22 +172,46 @@ class DeliveryOrder(AuditedModel):
                 )
             order_line.save(update_fields=["delivered_quantity", "delivered_spare_quantity", "updated_at"])
             if (
-                getattr(settings, "ERP_DELIVERY_POST_STOCK", False)
+                post_stock
                 and self.delivery_mode == SalesOrder.DeliveryMode.DIRECT
                 and not line.material.no_stock_movement
             ):
-                StockBalance.adjust(
+                if stock_delta > 0 and line.source_delivery_line_id and not line.source_delivery_line.delivery.stock_posted:
+                    raise ValidationError("来源为启用库存前的历史送货，请先核实退货期初边界")
+                from backend.inventory_codes import TRANSFER_IN, TRANSFER_OUT
+                consignment = order_line.order.consignment
+                destination = None
+                if consignment:
+                    from .master_data import Location
+                    destination = Location.objects.filter(source_site=line.source_location.source_site,
+                        code=self.customer.code).first()
+                    if destination is None:
+                        raise ValidationError("寄售送货必须先维护同站点的客户库位")
+                # Sales detail rates follow dgyzx1 m/d, including same-unit non-1 rates.
+                snapshot = line.source_snapshot or {}
+                rate_m = snapshot.get('uom_rate_m', order_line.uom_rate_m)
+                rate_d = snapshot.get('uom_rate_d', order_line.uom_rate_d)
+                stock_args = dict(
                     material=line.material,
-                    location=line.source_location,
                     uom=line.uom,
-                    quantity=stock_delta,
-                    movement_type=movement_type,
                     source_model=self._meta.label_lower,
                     source_id=self.pk,
-                    source_line_id=line.pk,
+                    source_line_id=f'{line.pk}:{self.posting_version}' if local_ledger else line.pk,
                     actor=actor,
                     batch_number=line.batch_number,
+                    effective_date=self.delivery_date,
+                    uom_rate_m=rate_m,
+                    uom_rate_d=rate_d,
+                    usage="sales",
+                    native_sales_rates=True,
                 )
+                if stock_delta:
+                    StockBalance.adjust(**stock_args, location=line.source_location, quantity=stock_delta,
+                        movement_type=TRANSFER_OUT if consignment else movement_type)
+                    if destination:
+                        StockBalance.adjust(**stock_args, location=destination, quantity=-stock_delta,
+                            movement_type=TRANSFER_IN)
+                self.stock_posted = True
         self.posted = True
 
     def save(self, *args, **kwargs):
@@ -182,9 +219,40 @@ class DeliveryOrder(AuditedModel):
             self.number = DeliveryOrderSequence.next_number(self.delivery_date)
         super().save(*args, **kwargs)
 
-    def unapprove(self):
+    def unapprove(self, actor=''):
         if self.posted:
-            raise ValidationError("已回写订单的送货单不能反审核修改，请通过负数送货冲回")
+            from backend.live_inventory import live_batch
+            from .inventory import StockTransaction
+            if not live_batch() or not self.stock_posted or not self.posting_version:
+                raise ValidationError("启用本地库存前的已生效送货不能反审核，请先核实历史边界")
+            if self.is_confirmed:
+                raise ValidationError('已确认回单的送货单请先取消回单确认')
+            lines = list(self.lines.select_related('sales_order_line', 'material'))
+            orders = {line.pk: line for line in SalesOrderLine.objects.select_for_update().filter(
+                pk__in=[line.sales_order_line_id for line in lines]).order_by('pk')}
+            for line in lines:
+                order_line = orders[line.sales_order_line_id]
+                order_line.delivered_quantity -= line.actual_quantity
+                order_line.delivered_spare_quantity -= line.actual_spare_quantity
+                if min(order_line.delivered_quantity, order_line.delivered_spare_quantity) < 0:
+                    raise ValidationError('后续退回已使用本单送货数量，不能反审核')
+            movements = list(StockTransaction.objects.filter(source_model=self._meta.label_lower,
+                source_id=str(self.pk), source_line_id__in=[f'{line.pk}:{self.posting_version}' for line in lines])
+                .select_related('material', 'location', 'uom', 'business_uom').order_by('location_id', 'id'))
+            for movement in movements:
+                StockBalance.adjust(material=movement.material, location=movement.location,
+                    uom=movement.business_uom or movement.uom,
+                    quantity=-movement.business_quantity if movement.business_quantity is not None else -movement.quantity,
+                    movement_type=movement.movement_type, source_model=self._meta.label_lower,
+                    source_id=self.pk, source_line_id=movement.source_line_id + ':reverse',
+                    actor=actor or self.approved_by, batch_number=movement.batch_number,
+                    effective_date=self.delivery_date, reversal_of=movement,
+                    uom_rate_m=movement.uom_rate_m, uom_rate_d=movement.uom_rate_d, native_sales_rates=True)
+            for line in orders.values():
+                if line.line_status in ('C', 'closed') and line.closed_by == 'SYSTEM':
+                    line.line_status, line.closed_by, line.closed_at = 'normal', '', None
+                line.save(update_fields=['delivered_quantity', 'delivered_spare_quantity', 'line_status', 'closed_by', 'closed_at', 'updated_at'])
+            self.posted, self.stock_posted = False, False
         super().unapprove()
 
 
@@ -225,6 +293,10 @@ class DeliveryOrderLine(models.Model):
 
     def clean(self):
         order_line = self.sales_order_line
+        if self.pk:
+            previous = type(self).objects.get(pk=self.pk)
+            if previous.line_number != self.line_number or previous.delivery_id != self.delivery_id:
+                raise ValidationError("送货行号和所属送货单不能修改")
         if order_line.order.customer_id != self.delivery.customer_id:
             raise ValidationError({"sales_order_line": "订单明细必须属于送货客户"})
         if self.customer_material_id != order_line.customer_material_id:
@@ -298,18 +370,37 @@ class SalesReturn(AuditedModel):
     number = models.CharField(max_length=40, unique=True, blank=True)
     customer = models.ForeignKey("Partner", on_delete=models.PROTECT, related_name="sales_returns")
     return_date = models.DateField(default=timezone.localdate)
-    srm_number = models.CharField(max_length=80)
-    reason = models.CharField(max_length=240)
+    srm_number = models.CharField(max_length=80, blank=True)
+    reason = models.CharField(max_length=240, blank=True)
     no_order = models.BooleanField(default=True)
     source_delivery = models.ForeignKey(
         DeliveryOrder, on_delete=models.PROTECT, null=True, blank=True, related_name="sales_returns"
     )
     posted = models.BooleanField(default=False, editable=False)
 
+    site = models.CharField(max_length=32, default="1000")
+    currency = models.ForeignKey("Currency", null=True, blank=True, on_delete=models.PROTECT)
+    exchange_rate = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal(1))
+    tax_rate = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal(0))
+    customer_po = models.CharField(max_length=80, blank=True)
+    business_group = models.CharField(max_length=32, blank=True)
+    delivery_address = models.CharField(max_length=240, blank=True)
+    default_print_person = models.CharField(max_length=64, blank=True)
+    is_signed = models.BooleanField(default=False, editable=False)
+    signed_by = models.CharField(max_length=64, blank=True, editable=False)
+    signed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    stock_posted = models.BooleanField(default=False, editable=False)
+    posting_version = models.PositiveIntegerField(default=0, editable=False)
+    revision = models.PositiveIntegerField(default=0, editable=False)
+    source_key = models.CharField(max_length=80, blank=True, editable=False)
+    downstream_references = models.JSONField(default=list, blank=True, editable=False)
+
     class Meta:
         ordering = ("-return_date", "-number")
 
     def clean(self):
+        if self.no_order and self.source_delivery_id:
+            raise ValidationError({"source_delivery": "无订单退货不能绑定送货单或订单行"})
         if self.customer_id and self.customer.kind not in {Partner.PartnerKind.CUSTOMER, Partner.PartnerKind.BOTH}:
             raise ValidationError({"customer": "销售退货必须关联客户"})
         if self.source_delivery_id and self.source_delivery.status != ApprovalStatus.APPROVED:
@@ -318,6 +409,9 @@ class SalesReturn(AuditedModel):
             raise ValidationError({"source_delivery": "来源送货单客户必须一致"})
 
     def approve(self, actor):
+        if self.no_order:
+            from backend.no_order_returns import post_return
+            return post_return(self, actor)
         lines = list(self.lines.select_related("material", "uom", "original_location", "return_location"))
         if not lines:
             raise ValidationError("销售退货单至少需要一条明细")
@@ -343,19 +437,25 @@ class SalesReturn(AuditedModel):
         super().approve(actor)
         if self.posted:
             return
+        from backend.live_inventory import live_batch
+        post_stock = bool(live_batch()) or getattr(settings, "ERP_DELIVERY_POST_STOCK", False)
         for line in lines:
-            if getattr(settings, "ERP_DELIVERY_POST_STOCK", False) and not line.material.no_stock_movement:
+            if post_stock and not line.material.no_stock_movement:
+                if line.source_delivery_line_id and not line.source_delivery_line.delivery.stock_posted:
+                    raise ValidationError("来源历史送货未记录库存过账，请先核实退货期初边界")
                 StockBalance.adjust(
                     material=line.material,
                     location=line.return_location,
                     uom=line.uom,
                     quantity=line.quantity,
-                    movement_type="sales_return",
+                    movement_type=SALES_RETURN,
                     source_model=self._meta.label_lower,
                     source_id=self.pk,
                     source_line_id=line.pk,
                     actor=actor,
                     batch_number=line.batch_number,
+                    effective_date=self.return_date,
+                    usage="sales",
                 )
             order_line = line.sales_order_line or (
                 line.source_delivery_line.sales_order_line if line.source_delivery_line_id else None
@@ -382,10 +482,17 @@ class SalesReturn(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"SRT-{timezone.now():%Y%m%d%H%M%S%f}"
+            if self.no_order:
+                self.number = SalesReturnSequence.next_number(self.return_date)
+            else:
+                from .document_numbers import next_document_number
+                self.number = next_document_number('MYSR', self.return_date, 'SalesReturn')
         super().save(*args, **kwargs)
 
     def unapprove(self):
+        if self.no_order:
+            from backend.no_order_returns import unpost_return
+            return unpost_return(self, self.updated_by or self.approved_by)
         if self.posted:
             raise ValidationError("已回写订单的退货单不能反审核修改")
         super().unapprove()
@@ -396,9 +503,9 @@ class SalesReturnLine(models.Model):
     line_number = models.PositiveIntegerField()
     material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="sales_return_lines")
     uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="sales_return_lines")
-    quantity = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0.000001"))])
+    quantity = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
     original_location = models.ForeignKey(
-        "Location", on_delete=models.PROTECT, related_name="originating_sales_returns"
+        "Location", on_delete=models.PROTECT, related_name="originating_sales_returns", null=True, blank=True
     )
     return_location = models.ForeignKey("Location", on_delete=models.PROTECT, related_name="received_sales_returns")
     batch_number = models.CharField(max_length=80, blank=True)
@@ -409,11 +516,41 @@ class SalesReturnLine(models.Model):
         DeliveryOrderLine, on_delete=models.PROTECT, null=True, blank=True, related_name="sales_return_lines"
     )
 
+    spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal(0), validators=[MinValueValidator(Decimal(0))])
+    unit_price = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal(0), validators=[MinValueValidator(Decimal(0))])
+    notes = models.CharField(max_length=240, blank=True)
+    customer_material = models.ForeignKey("CustomerMaterial", null=True, blank=True, on_delete=models.PROTECT)
+    customer_material_code = models.CharField(max_length=80, blank=True)
+    terminal_customer_code = models.CharField(max_length=80, blank=True)
+    terminal_customer_name = models.CharField(max_length=160, blank=True)
+    material_name = models.CharField(max_length=160, blank=True)
+    material_specification = models.TextField(blank=True)
+    inventory_uom = models.ForeignKey("Uom", null=True, blank=True, on_delete=models.PROTECT, related_name="return_stock_lines")
+    uom_rate_m = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal(1))
+    uom_rate_d = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal(1))
+    created_by = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    modification_count = models.PositiveIntegerField(default=0)
+
     class Meta:
         ordering = ("sales_return", "line_number")
         constraints = [models.UniqueConstraint(fields=("sales_return", "line_number"), name="uniq_sales_return_line")]
 
     def clean(self):
+        if self.sales_return_id and self.sales_return.no_order:
+            if self.sales_order_line_id or self.source_delivery_line_id:
+                raise ValidationError("无订单退货不能绑定订单行或送货行")
+            if self.quantity < 0 or self.spare_quantity < 0 or self.quantity + self.spare_quantity <= 0:
+                raise ValidationError("退货数量和退备品数必须非负，合计必须大于零")
+            if self.uom_rate_m <= 0 or self.uom_rate_d <= 0:
+                raise ValidationError("单位换算分子分母必须大于零")
+        elif not self.original_location_id:
+            raise ValidationError({"original_location": "有订单退货必须填写原出货库位"})
+        elif self.quantity <= 0:
+            raise ValidationError({"quantity": "有订单退货数量必须大于零"})
+
         if (
             self.sales_return_id
             and not self.sales_return.no_order
@@ -439,14 +576,6 @@ class SalesReturnLine(models.Model):
             reserved = commitments([order_line.pk], exclude_return_line=self.pk)[order_line.pk][1]
             if self.quantity + reserved > order_line.delivered_quantity:
                 raise ValidationError({"quantity": "本次退货与其他未审核退回合计超过净已送数量"})
-        if (
-            self.sales_return_id
-            and self.sales_return.no_order
-            and self.original_location_id
-            and self.original_location.code.upper() == "FG01"
-        ):
-            if self.return_location.code.upper() != "RMA":
-                raise ValidationError({"return_location": "FG01 无订单销售退货必须先进入实体不良仓 RMA"})
         if self.sales_return_id and self.source_delivery_line_id:
             source = self.source_delivery_line
             if source.delivery.status != ApprovalStatus.APPROVED:
@@ -474,3 +603,48 @@ class SalesReturnLine(models.Model):
             ).aggregate(total=models.Sum("actual_quantity"))["total"] or Decimal("0")
             if already_returned + abs(reversed_quantity) + self.quantity > source.actual_quantity:
                 raise ValidationError({"quantity": "退货数量不能超过原送货数量"})
+
+
+class SalesReturnSequence(models.Model):
+    period = models.CharField(max_length=6, primary_key=True)
+    last_value = models.PositiveIntegerField(default=0)
+
+    @classmethod
+    def next_number(cls, date):
+        period = date.strftime("%Y%m")
+        prefix = f"MYSN{period[2:]}"
+        with transaction.atomic():
+            seq, _ = cls.objects.select_for_update().get_or_create(period=period)
+            values = SalesReturn.objects.filter(number__startswith=prefix).values_list("number", flat=True)
+            seq.last_value = max([seq.last_value, *(int(n[-4:]) for n in values if len(n) == 12 and n[-4:].isdigit())]) + 1
+            if seq.last_value > 9999:
+                raise ValidationError("退货单本月四位流水已用完")
+            seq.save()
+            return f"{prefix}{seq.last_value:04d}"
+
+
+class SalesReturnHistory(models.Model):
+    """Local sdh_hist equivalent; negative sales quantities, separate from stock."""
+    line = models.ForeignKey(SalesReturnLine, on_delete=models.PROTECT, related_name="sales_history")
+    version = models.PositiveIntegerField()
+    quantity = models.DecimalField(max_digits=19, decimal_places=8)
+    spare_quantity = models.DecimalField(max_digits=19, decimal_places=8)
+    active = models.BooleanField(default=True)
+    snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("line", "version"), name="unique_return_sales_history")]
+
+
+class InventoryPostingControl(models.Model):
+    """Local operational calendar following sys_ctrl/glc_cal, never inferred from today's date."""
+    site = models.CharField(max_length=32, primary_key=True)
+    min_date = models.DateField()
+    max_date = models.DateField()
+    closed_year = models.PositiveIntegerField(default=0)
+    closed_month = models.PositiveIntegerField(default=0)
+    calendar = models.JSONField(default=list)
+    location_permissions = models.JSONField(default=dict)
+    source_database = models.CharField(max_length=40, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)

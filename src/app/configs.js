@@ -1,3 +1,4 @@
+import { Calculator } from 'lucide-react'
 import { organizationConfigs } from '../modules/system/configs'
 import { masterDataConfigs } from '../modules/master-data/configs'
 import { engineeringConfigs } from '../modules/engineering/configs'
@@ -12,6 +13,7 @@ export const configs = {
   ...salesConfigs,
   ...purchaseConfigs,
   ...inventoryConfigs,
+  tradeMrp: { title: '贸易端MRP', icon: Calculator, permission: 'mrp', resource: 'trade-mrp', fields: [], columns: [] },
 }
 
 for (const id of ['departments', 'currencies', 'paymentMethods', 'locations', 'categories', 'uoms', 'materials', 'customers', 'customerMaterials', 'suppliers']) {

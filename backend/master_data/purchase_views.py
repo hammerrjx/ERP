@@ -1,7 +1,7 @@
+from django.core.exceptions import ValidationError as ModelValidationError
 from backend.domain.finance import PayableVoucher, PayableVoucherLine
 from decimal import Decimal
 
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -42,6 +42,7 @@ from .serializers.purchase import (
     SupplierQuoteLineSerializer,
     SupplierQuoteSerializer,
 )
+from .sales_pagination import SalesPage
 
 
 class SupplierQuoteViewSet(ApprovalViewSet):
@@ -56,6 +57,25 @@ class SupplierQuoteViewSet(ApprovalViewSet):
         "parent_material",
     ).prefetch_related("lines")
     serializer_class = SupplierQuoteSerializer
+    search_fields = (
+        "number", "supplier__code", "supplier__name", "material__code",
+        "material__name", "material__specification", "effective_date", "expiry_date", "notes", "quote_type",
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action == "list" and self.request.query_params.get("q", "").strip():
+            condition = Q()
+            for field in self.search_fields:
+                condition |= Q(**{f"{field}__icontains": self.request.query_params["q"].strip()})
+            queryset = queryset.filter(condition).distinct()
+        return queryset.order_by("-effective_date", "-pk")
+
+    def paginate_queryset(self, queryset):
+        if self.action != "list" or "page" not in self.request.query_params:
+            return None
+        self._paginator = SalesPage()
+        return self._paginator.paginate_queryset(queryset, self.request, view=self)
 
     @decorators.action(detail=False, methods=["get"])
     def resolve(self, request):
@@ -87,7 +107,7 @@ class SupplierQuoteViewSet(ApprovalViewSet):
             raise serializers.ValidationError("未找到匹配日期、类型和状态的有效供应商报价")
         try:
             unit_price, tier = quote.price_for(request.query_params["quantity"])
-        except DjangoValidationError as exc:
+        except ModelValidationError as exc:
             raise serializers.ValidationError(exc.messages) from exc
         data = self.get_serializer(quote).data
         data.update(
@@ -132,74 +152,37 @@ class PurchaseOrderViewSet(ApprovalViewSet):
     @decorators.action(detail=True, methods=["post"], url_path="generate-receipt")
     @transaction.atomic
     def generate_receipt(self, request, pk=None):
-        order = self.get_object()
-        if order.status != ApprovalStatus.APPROVED:
-            raise serializers.ValidationError("只有已审核采购单可以生成收货草稿")
-        receipt_type = request.data.get("receipt_type", GoodsReceipt.ReceiptType.NORMAL)
-        if order.purchase_type == PurchaseOrder.PurchaseType.NON_PRODUCTION:
-            receipt_type = GoodsReceipt.ReceiptType.NON_PRODUCTION
-        receipt = GoodsReceipt(
-            supplier=order.supplier,
-            purchase_order=order,
-            receipt_date=request.data.get("receipt_date") or timezone.localdate(),
-            supplier_delivery_number=request.data.get("supplier_delivery_number", ""),
-            receipt_type=receipt_type,
-            notes=request.data.get("notes", ""),
-            created_by=request.user.get_username(),
-        )
-        receipt.full_clean()
-        receipt.save()
-        created = 0
-        selected = request.data.get("lines")
+        from backend import receiving
+        from .receiving_views import GoodsReceiptViewSet
+        order = PurchaseOrder.objects.select_for_update().get(pk=pk)
+        if order.status != ApprovalStatus.APPROVED or order.purchase_type != 'production':
+            raise serializers.ValidationError("仅已审核普通采购单可以生成收货")
+        selected = request.data.get('lines')
         if selected is not None and not isinstance(selected, list):
-            raise serializers.ValidationError({"lines": "收货明细必须是列表"})
-        requested_lines = {
-            item.get("purchase_order_line"): item for item in (selected or []) if item.get("purchase_order_line")
-        }
-        if selected is not None and len(requested_lines) != len(selected):
-            raise serializers.ValidationError({"lines": "每条收货明细必须且只能选择一个采购订单行"})
-        found_line_ids = set()
-        for order_line in order.lines.select_related("material", "uom"):
-            source = requested_lines.get(order_line.pk)
-            if selected is not None and source is None:
-                continue
-            found_line_ids.add(order_line.pk)
-            quantity = (
-                Decimal(str(source.get("quantity")))
-                if source and source.get("quantity") is not None
-                else order_line.quantity - order_line.received_quantity
-            )
-            if quantity <= 0:
-                continue
-            line = GoodsReceiptLine(
-                receipt=receipt,
-                line_number=order_line.line_number,
-                purchase_order_line=order_line,
-                material=order_line.material,
-                uom=order_line.uom,
-                quantity=quantity,
-                location_id=(source or {}).get("location")
-                or order.supplier.default_receipt_location_id
-                or order_line.material.default_location_id,
-                batch_number=(source or {}).get("batch_number", ""),
-            )
-            line.full_clean()
-            line.save()
-            created += 1
-        unknown_lines = set(requested_lines).difference(found_line_ids)
-        if unknown_lines:
-            raise serializers.ValidationError({"lines": f"采购订单不包含来源行: {sorted(unknown_lines)}"})
-        if not created:
-            receipt.delete()
-            raise serializers.ValidationError("采购单没有待收货明细")
-        AuditEvent.objects.create(
-            model=receipt._meta.label_lower,
-            object_id=str(receipt.pk),
-            action="generate_from_purchase_order",
-            actor=request.user.get_username() or "system",
-            payload={"purchase_order_id": order.pk, "purchase_order_line_ids": list(requested_lines)},
-        )
-        return response.Response(GoodsReceiptSerializer(receipt).data, status=201)
+            raise serializers.ValidationError('明细必须为列表')
+        sources = {p.pk:p for p in order.lines.select_for_update().select_related('material').order_by('pk')}
+        if selected is None:
+            selected=[]
+            for p in sources.values():
+                q, spare, _, _ = receiving.available(p)
+                if p.line_status not in ('C','closed') and (q>0 or spare>0):
+                    selected.append(dict(purchase_order_line=p.pk,quantity=str(max(q,0)),spare_quantity=str(max(spare,0))))
+        rows=[];seen=set()
+        for row in selected:
+            identity=row.get('purchase_order_line')
+            if identity not in sources or identity in seen:
+                raise serializers.ValidationError('采购来源行不存在或重复')
+            seen.add(identity);p=sources[identity]
+            rows.append(dict(row,line_number=p.line_number,location=row.get('location') or order.supplier.default_receipt_location_id or p.material.default_location_id))
+        data=dict(request.data,supplier=order.supplier_id,site=order.site,lines=rows)
+        # Route legacy generation through the same transactional sheet validation.
+        from types import SimpleNamespace
+        view=GoodsReceiptViewSet()
+        try:
+            result=view.save_sheet(SimpleNamespace(data=data,user=request.user))
+        except ModelValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
+        return response.Response(result,status=201)
 
 
 PurchaseOrderLineViewSet = make_viewset(PurchaseOrderLine, PurchaseOrderLineSerializer)
@@ -337,10 +320,14 @@ class PurchaseRequisitionViewSet(ApprovalViewSet):
         if any(item.rfq_line.rfq.requisition_id != requisition.id for item in inquiries):
             raise serializers.ValidationError("询价响应必须来自当前请购单")
         supplier = inquiries[0].supplier
+        from backend.models import Department
+        department = requisition.department or Department.objects.filter(pk=request.data.get('department')).first()
+        if not department:
+            raise serializers.ValidationError('转采购时请指定采购部门')
         order = PurchaseOrder.objects.create(
             supplier=supplier,
             currency=inquiries[0].rfq_line.rfq.currency,
-            department=requisition.department,
+            department=department,
             payment_method=supplier.payment_method,
             tax_rate=inquiries[0].tax_rate,
             promised_date=max(item.promised_date for item in inquiries),
@@ -359,9 +346,7 @@ class PurchaseRequisitionViewSet(ApprovalViewSet):
                 promised_date=inquiry.promised_date,
                 source_requisition_line=rfq_line.requisition_line,
             )
-            source_line = rfq_line.requisition_line
-            source_line.converted_qty += rfq_line.quantity
-            source_line.save(update_fields=["converted_qty"])
+        requisition._prefetched_objects_cache = {}
         total_requested = sum((line.requested_qty for line in requisition.lines.all()), Decimal("0"))
         total_converted = sum((line.converted_qty for line in requisition.lines.all()), Decimal("0"))
         requisition.conversion_percent = (

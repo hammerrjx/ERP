@@ -5,6 +5,8 @@ import { api } from '../../api/client'
 import { statusLabels, today } from '../../shared/presentation'
 import { AsyncForm } from '../../components/PendingControls'
 
+import { useSalesLookups } from './useSalesLookups'
+
 const numeric = (value) => Number(value || 0)
 const fixed = (value) => (Number.isFinite(value) ? value.toFixed(8) : '')
 const optionCode = (row) => row?.customer_code || row?.code || row?.material_code || row?.number || `#${row?.id}`
@@ -37,25 +39,26 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
     promised_date: sourceLine.promised_date || '',
     line_notes: sourceLine.notes || ''
   })
+  const lookup = useSalesLookups(token, values.customer, [values], lookups)
   const [tiers, setTiers] = useState(sourceLine.tiers || [])
   const [previous, setPrevious] = useState(null)
   const [previousError, setPreviousError] = useState('')
   const [previousLoading, setPreviousLoading] = useState(false)
   const [retry, setRetry] = useState(0)
   const customer = (lookups.customers || []).find((row) => row.id === Number(values.customer))
-  const material = (lookups.materials || []).find((row) => row.id === Number(values.material))
-  const customerMaterial = (lookups.customerMaterials || []).find((row) => row.id === Number(values.customer_material))
+  const material = (lookup.materials).find((row) => row.id === Number(values.material))
+  const customerMaterial = (lookup.customerMaterials).find((row) => row.id === Number(values.customer_material))
   const currency = (lookups.currencies || []).find((row) => row.id === Number(values.currency))
   const uom = (lookups.uoms || []).find((row) => row.id === (customerMaterial?.customer_uom || material?.uom))
   const customerMaterials = useMemo(
     () =>
-      (lookups.customerMaterials || []).filter(
+      (lookup.customerMaterials).filter(
         (row) =>
           row.enabled === true &&
           Number(row.customer) === Number(values.customer) &&
           (!values.material || Number(row.material) === Number(values.material))
       ),
-    [lookups.customerMaterials, values.customer, values.material]
+    [lookup.customerMaterials, values.customer, values.material]
   )
   const customerAddresses = useMemo(
     () =>
@@ -122,7 +125,7 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
         }
       }
       if (key === 'material') {
-        const selected = (lookups.customerMaterials || []).find((row) => row.id === Number(current.customer_material))
+        const selected = (lookup.customerMaterials).find((row) => row.id === Number(current.customer_material))
         return {
           ...current,
           material: value,
@@ -130,7 +133,7 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
         }
       }
       if (key === 'customer_material') {
-        const selected = (lookups.customerMaterials || []).find((row) => row.id === Number(value))
+        const selected = (lookup.customerMaterials).find((row) => row.id === Number(value))
         return { ...current, customer_material: value, material: selected?.material || current.material }
       }
       if (key === 'address_code') {
@@ -195,6 +198,7 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
             <X size={19} />
           </button>
         </div>
+        {lookup.error && <div role="alert">{lookup.error}</div>}
         <section className="quote-section">
           <h3>客户与有效期</h3>
           <div className="quote-grid">
@@ -304,8 +308,9 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
               optionCode={optionCode}
               optionText={optionSearchText}
               label="物料编码"
+              onSearch={q => lookup.search("materials", q)}
               value={values.material}
-              options={lookups.materials || []}
+              options={lookup.materials}
               required
               disabled={readOnly}
               onChange={(value) => update('material', value)}
@@ -316,6 +321,7 @@ export function SalesQuoteModal({ token, lookups, record, readOnly = false, onCl
               optionCode={optionCode}
               optionText={optionSearchText}
               label="客户物料编码"
+              onSearch={q => lookup.search("customerMaterials", q, values.material)}
               value={values.customer_material}
               options={customerMaterials}
               disabled={readOnly}

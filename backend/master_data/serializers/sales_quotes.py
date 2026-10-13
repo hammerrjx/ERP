@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 
 from backend.models import Currency, CustomerMaterial, Partner, SalesQuote, SalesQuoteLine, SalesQuoteTier
@@ -7,6 +8,7 @@ from .common import BaseSerializer
 
 
 class CustomerMaterialSerializer(BaseSerializer):
+    customer_label = serializers.CharField(source="customer.code", read_only=True)
     material_code = serializers.CharField(source="material.code", read_only=True)
     material_name = serializers.CharField(source="material.name", read_only=True)
     material_specification = serializers.CharField(source="material.specification", read_only=True)
@@ -16,6 +18,7 @@ class CustomerMaterialSerializer(BaseSerializer):
         fields = (
             "id",
             "customer",
+            "customer_label",
             "material",
             "material_code",
             "material_name",
@@ -158,6 +161,7 @@ class SalesQuoteLineSerializer(serializers.ModelSerializer):
 class SalesQuoteSerializer(serializers.ModelSerializer):
     lines = SalesQuoteLineSerializer(many=True)
     currency = serializers.PrimaryKeyRelatedField(queryset=Currency.objects.all(), required=False)
+    is_price_eligible = serializers.SerializerMethodField()
     customer_code = serializers.CharField(source="customer.code", read_only=True)
     customer_name = serializers.CharField(source="customer.name", read_only=True)
     currency_code = serializers.CharField(source="currency.code", read_only=True)
@@ -167,7 +171,7 @@ class SalesQuoteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalesQuote
-        fields = "__all__"
+        exclude = ("source_snapshot",)
         read_only_fields = (
             "number",
             "backup_ratio",
@@ -214,6 +218,15 @@ class SalesQuoteSerializer(serializers.ModelSerializer):
     def get_unit_price(self, obj):
         line = self._first_line(obj)
         return format(line.unit_price, ".8f") if line else None
+
+    def get_is_price_eligible(self, obj):
+        """Expose whether this quote can be used for an order dated today."""
+        if not obj.is_price_eligible:
+            return False
+        target_date = timezone.localdate()
+        return obj.effective_date <= target_date and (
+            obj.expiry_date is None or obj.expiry_date >= target_date
+        )
 
     def validate(self, attrs):
         customer = attrs.get("customer") or getattr(self.instance, "customer", None)

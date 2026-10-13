@@ -31,6 +31,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # SQL Server requires dependent constraints removed before changing precision.
+        migrations.RemoveConstraint(model_name='supplierquoteline', name='uniq_quote_min_qty'),
         migrations.CreateModel(
             name='SupplierQuoteSequence',
             fields=[
@@ -218,6 +220,10 @@ class Migration(migrations.Migration):
             field=models.DecimalField(blank=True, decimal_places=8, max_digits=19, null=True, validators=[django.core.validators.MinValueValidator(Decimal('0'))]),
         ),
         migrations.RunPython(backfill_supplier_quote_fields, migrations.RunPython.noop),
+        migrations.AddConstraint(
+            model_name='supplierquoteline',
+            constraint=models.UniqueConstraint(fields=('quote', 'min_qty'), name='uniq_quote_min_qty'),
+        ),
         migrations.AddConstraint(
             model_name='supplierquoteline',
             constraint=models.UniqueConstraint(fields=('quote', 'line_number'), name='uniq_supplier_quote_line'),

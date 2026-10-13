@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { listPayload, resourceApi } from '../api/client'
+import { api, listPayload, resourceApi } from '../api/client'
 import { can } from '../auth/session'
 import { configs } from './configs'
 
-export function useResourceData(session, active) {
+export function useResourceData(session, active, query = '') {
+  const paged = ['customerMaterials', 'salesQuotes', 'salesOrders', 'deliveries'].includes(active)
+  const [pagination, setPagination] = useState({ page: 1, count: 0, page_size: 50 })
+  const pageRef = useRef(1)
   const [rows, setRows] = useState([])
   const [lookups, setLookups] = useState({})
   const [dashboard, setDashboard] = useState({})
@@ -13,45 +16,91 @@ export function useResourceData(session, active) {
   const [dashboardLoading, setDashboardLoading] = useState(false)
   const [deliveryLookupsLoading, setDeliveryLookupsLoading] = useState(false)
   const requestSequence = useRef(0)
-  const lookupCache = useRef(new Map())
+  const listCache = useRef(new Map())
   const deliveryLookupsLoaded = useRef(false)
   const deliveryLookupsPromise = useRef(null)
   const salesOrderLookupsLoaded = useRef(false)
+
+  const loadList = useCallback((resource) => {
+    const cache = listCache.current
+    const cached = cache.get(resource)
+    if (cached && (cached.pending || cached.expires > Date.now())) return cached.promise
+    const entry = { pending: true }
+    entry.promise = resourceApi(resource, session.token).list().then((result) => {
+      entry.data = listPayload(result)
+      entry.expires = Date.now() + 30_000
+      entry.pending = false
+      return entry.data
+    }).catch((error) => {
+      if (cache.get(resource) === entry) cache.delete(resource)
+      throw error
+    })
+    cache.set(resource, entry)
+    return entry.promise
+  }, [session])
 
   const loadLookup = useCallback(
     async (id) => {
       const cfg = configs[id]
       if (!cfg || !can(session, cfg.permission)) return [id, []]
-      if (lookupCache.current.has(id)) return [id, lookupCache.current.get(id)]
-      const data = listPayload(await resourceApi(cfg.resource, session.token).list())
+      const data = await loadList(cfg.resource)
       const filtered = cfg.filter ? data.filter(cfg.filter) : data
-      if (
-        [
-          'customers',
-          'customerAddresses',
-          'materials',
-          'customerMaterials',
-          'uoms',
-          'currencies',
-          'businessGroups',
-          'paymentMethods',
-          'employees',
-          'locations'
-        ].includes(id)
-      ) {
-        lookupCache.current.set(id, filtered)
-      }
       return [id, filtered]
     },
-    [session]
+    [session, loadList]
   )
 
+  const loadPage = useCallback(async (target, page = 1, force = false) => {
+    const cfg = configs[target]
+    if (!cfg || !can(session, cfg.permission)) return
+    const requestId = ++requestSequence.current
+    const params = new URLSearchParams({ page, page_size: 50, q: query.trim() })
+    const cacheKey = `${cfg.resource}?${params}`
+    if (force) listCache.current.clear()
+    const cached = listCache.current.get(cacheKey)
+    setLoading(true)
+    setError('')
+    try {
+      const result = cached && cached.expires > Date.now() ? cached.data
+        : await api(`/${cfg.resource}/?${params}`, { token: session.token })
+      if (requestId !== requestSequence.current) return
+      listCache.current.set(cacheKey, { data: result, expires: Date.now() + 30_000 })
+      pageRef.current = result.page || page
+      setPagination({ page: result.page || page, count: result.count ?? result.length, page_size: 50 })
+      setRows(listPayload(result))
+      setLoading(false)
+      const ids = target === 'customerMaterials' ? ['uoms'] : ['customers']
+      const entries = await Promise.all(ids.map(loadLookup))
+      if (requestId === requestSequence.current) setLookups(previous => ({ ...previous, ...Object.fromEntries(entries) }))
+    } catch (error) {
+      if (requestId === requestSequence.current) { setError(error.message); setLoading(false) }
+    }
+  }, [session, query, loadLookup])
+
+  const loadEditorLookups = useCallback(async (target) => {
+    const cfg = configs[target]
+    const ids = [...new Set([...cfg.fields.filter(f => f.lookup).map(f => f.lookup), ...(cfg.extraLookups || [])])]
+      .filter(id => !['materials', 'customerMaterials', 'salesQuotes'].includes(id))
+    const entries = await Promise.all(ids.map(loadLookup))
+    setLookups(previous => ({ ...previous, ...Object.fromEntries(entries) }))
+  }, [loadLookup])
+
   const loadConfig = useCallback(
-    async (target) => {
+    async (target, force = true) => {
+      if (['customerMaterials', 'salesQuotes', 'salesOrders', 'deliveries'].includes(target)) return loadPage(target, pageRef.current, force)
       const cfg = configs[target]
       if (!cfg || !can(session, cfg.permission)) return
       const requestId = ++requestSequence.current
-      setLoading(true)
+      if (cfg.inventoryAnalysis || cfg.inventoryLedger || cfg.warehouseKind || ['balances', 'transactions', 'materials', 'suppliers', 'supplierQuotes', 'requisitions', 'receipts', 'purchaseReturns', 'tradeMrp'].includes(target)) { setRows([]); setLoading(false); setError(''); return }
+      if (force) {
+        listCache.current.clear()
+        deliveryLookupsLoaded.current = false
+        salesOrderLookupsLoaded.current = false
+      }
+      const cached = listCache.current.get(cfg.resource)
+      const fresh = cached?.data && cached.expires > Date.now()
+      if (fresh) setRows(cfg.filter ? cached.data.filter(cfg.filter) : cached.data)
+      setLoading(!fresh)
       setError('')
       try {
         const allLookupIds = [
@@ -65,7 +114,7 @@ export function useResourceData(session, active) {
             ? allLookupIds.filter((id) => id === 'customers')
             : allLookupIds
         const lookupPromise = Promise.all(lookupIds.map(loadLookup))
-        const dataPromise = resourceApi(cfg.resource, session.token).list()
+        const dataPromise = loadList(cfg.resource)
         dataPromise
           .then((result) => {
             if (requestId !== requestSequence.current) return
@@ -93,7 +142,7 @@ export function useResourceData(session, active) {
         if (requestId === requestSequence.current) setError(requestError.message)
       }
     },
-    [session, loadLookup]
+    [session, loadLookup, loadList, loadPage]
   )
 
   const loadDeliveryLookups = useCallback(async () => {
@@ -129,9 +178,7 @@ export function useResourceData(session, active) {
       'businessGroups',
       'paymentMethods',
       'currencies',
-      'materials',
       'uoms',
-      'customerMaterials',
       'employees'
     ]
     try {
@@ -173,40 +220,37 @@ export function useResourceData(session, active) {
 
   useEffect(() => {
     if (!session) return
-    if (active === 'overview') loadDashboard()
-    else if (active !== 'materialImport') loadConfig(active)
-  }, [active, loadConfig, loadDashboard, session])
-
-  const invalidateLookup = (resource) => {
-    const lookupByResource = {
-      partner: 'customers',
-      'customer-address': 'customerAddresses',
-      material: 'materials',
-      'customer-material': 'customerMaterials',
-      uom: 'uoms',
-      currency: 'currencies',
-      'business-group': 'businessGroups',
-      'payment-method': 'paymentMethods',
-      employee: 'employees',
-      location: 'locations'
+    if (paged) {
+      pageRef.current = 1
+      setLoading(true)
+      const timer = setTimeout(() => loadPage(active, 1), 250)
+      return () => { clearTimeout(timer); requestSequence.current += 1 }
     }
-    const id = lookupByResource[resource]
-    if (id) lookupCache.current.delete(id)
+    if (active === 'overview') loadDashboard()
+    else if (active !== 'materialImport') loadConfig(active, false)
+  }, [active, loadConfig, loadDashboard, session, paged, loadPage])
+
+  const invalidateLookup = () => {
+    listCache.current.clear()
     deliveryLookupsLoaded.current = false
     salesOrderLookupsLoaded.current = false
   }
   const resetPage = (id) => {
+    requestSequence.current += 1
     setError('')
-    setRows([])
+    const cfg = configs[id]
+    const cached = listCache.current.get(cfg?.resource)
+    const fresh = cached?.data && cached.expires > Date.now()
+    setRows(fresh ? (cfg.filter ? cached.data.filter(cfg.filter) : cached.data) : [])
     deliveryLookupsLoaded.current = false
     salesOrderLookupsLoaded.current = false
-    setLoading(id !== 'overview' && id !== 'materialImport')
+    setLoading(!fresh && id !== 'overview' && id !== 'materialImport')
     setDashboardLoading(id === 'overview')
     setDashboardError('')
   }
   const resetData = () => {
     requestSequence.current += 1
-    lookupCache.current.clear()
+    listCache.current = new Map()
     deliveryLookupsLoaded.current = false
     salesOrderLookupsLoaded.current = false
     setRows([])
@@ -217,6 +261,9 @@ export function useResourceData(session, active) {
 
   return {
     rows,
+    pagination: paged ? pagination : null,
+    loadPage,
+    loadEditorLookups,
     lookups,
     dashboard,
     dashboardError,

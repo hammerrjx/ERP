@@ -161,6 +161,10 @@ class LegacyImporter:
         return self
 
     def import_currencies(self):
+        if Currency.objects.filter(source_object='dgyzx1.ex_mstr').exists():
+            self.currencies = {canonical(item.code): item for item in Currency.objects.all()}
+            self.skip('货币', '本账套由dgyzx1同步维护，不使用Excel覆盖或新增')
+            return
         for row in WorkbookRows(self.paths["currency"]):
             code, name = canonical(row.get("货币")), text(row.get("名称"))
             if not re.fullmatch(r"[A-Z]{3}", code) or not name or len(name) > 40:
@@ -169,6 +173,8 @@ class LegacyImporter:
             if is_obvious_test(code, name) or not self.unique("currency", code):
                 self.skip("货币", "测试数据") if is_obvious_test(code, name) else None
                 continue
+            if Currency.objects.filter(code=code, source_object='dgyzx1.ex_mstr').exists():
+                continue  # An old workbook must not overwrite verified native currency metadata.
             Currency.objects.update_or_create(code=code, defaults={"name": name, "symbol": text(row.get("符号"))[:8], "status": ApprovalStatus.APPROVED, "created_by": text(row.get("录入人")) or "legacy-import"})
             self.imported["货币"] += 1
         self.currencies = {canonical(item.code): item for item in Currency.objects.all()}
@@ -435,7 +441,10 @@ class Command(BaseCommand):
                     PartnerBankAccount, PartnerContact, PartnerCompany, Partner,
                     ProductCategory, Location, Uom, UomCategory, CurrencyRate, Currency,
                 ):
-                    model.objects.all().delete()
+                    if model in (Currency, CurrencyRate):
+                        model.objects.exclude(source_object__startswith='dgyzx1.').delete()
+                    else:
+                        model.objects.all().delete()
             importer = LegacyImporter(paths, options["per_category"]).import_all()
         report_path = options["report"]
         report_path.parent.mkdir(parents=True, exist_ok=True)

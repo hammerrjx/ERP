@@ -46,11 +46,14 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--limit", type=int, default=500)
+        parser.add_argument("--category", help="按 pt_prod_line 导入完整产品类（包含历史失效版本）")
+        parser.add_argument("--profile", default="coerp_dgyzx1")
+        parser.add_argument("--export-source", type=Path)
         parser.add_argument("--commit", action="store_true")
         parser.add_argument("--bootstrap-dependencies", action="store_true", help="提交前导入本批报价所引用且本地缺失的源主数据")
         parser.add_argument("--source-file", type=Path, help="使用预先导出的 JSON 数据进行离线验证")
 
-    def read_source(self, limit, source_file=None):
+    def read_source(self, limit, source_file=None, category=None, profile="coerp_dgyzx1"):
         if source_file:
             source = json.loads(source_file.read_text(encoding="utf-8"))
             date_fields = ("sc_start", "sc_expire", "sc_crt_date", "sc_mod_date", "sc_pst_date", "sc_chk_date", "sc_appro_date")
@@ -64,7 +67,7 @@ class Command(BaseCommand):
         from tools.inspect_source_schema import ENV_FILE, connection_string, load_dotenv
 
         load_dotenv(ENV_FILE)
-        with pyodbc.connect(connection_string(), readonly=True) as connection:
+        with pyodbc.connect(connection_string(profile), readonly=True) as connection:
             cursor = connection.cursor()
 
             def rows(sql, parameters=()):
@@ -73,17 +76,18 @@ class Command(BaseCommand):
                 return [dict(zip(columns, item)) for item in result.fetchall()]
 
             headers = rows(f"""
-                SELECT TOP {limit}
-                    sc_nbr, sc_cust, sc_curr, sc_part, sc_cust_part, sc_um,
-                    sc_um_rate_m, sc_um_rate_d, sc_start, sc_expire, sc_vat,
-                    sc_vat_rate, sc_disc, sc_price, sc_rmks, sc_crt_by,
-                    sc_crt_date, sc_wf_status, sc_mod_times, sc_mod_by,
-                    sc_mod_date, sc_pst, sc_pst_by, sc_pst_date, sc_ast_code,
-                    sc_spare_pct, sc_qtype, sc_chk, sc_chk_by, sc_chk_date,
-                    sc_appro, sc_appro_by, sc_appro_date
-                FROM dbo.sc_mstr
+                SELECT {"" if category else f"TOP {limit}"} s.*
+                FROM dbo.sc_mstr s
+                {"JOIN dbo.pt_mstr p ON p.pt_part=s.sc_part WHERE p.pt_prod_line=?" if category else ""}
                 ORDER BY sc_mod_date DESC, sc_nbr DESC
-            """)
+            """, [category] if category else [])
+            def by_codes(table, column, codes):
+                result = []
+                for offset in range(0, len(codes), 500):
+                    batch = codes[offset:offset + 500]
+                    marks = ",".join("?" for _ in batch)
+                    result.extend(rows(f"SELECT * FROM dbo.{table} WHERE {column} IN ({marks})", batch))
+                return result
             numbers = [row["sc_nbr"] for row in headers]
             tiers = []
             for offset in range(0, len(numbers), 200):
@@ -92,14 +96,10 @@ class Command(BaseCommand):
                 tiers.extend(rows(f"SELECT * FROM dbo.scd_det WHERE scd_nbr IN ({placeholders})", batch))
             customer_codes = sorted({clean(row.get("sc_cust")) for row in headers if clean(row.get("sc_cust"))})
             material_codes = sorted({clean(row.get("sc_part")) for row in headers if clean(row.get("sc_part"))})
-            placeholders = ",".join("?" for _ in customer_codes) or "?"
-            customers = rows(f"SELECT * FROM dbo.cm_mstr WHERE cm_addr IN ({placeholders})", customer_codes or [""])
-            placeholders = ",".join("?" for _ in material_codes) or "?"
-            materials = rows(f"SELECT * FROM dbo.pt_mstr WHERE pt_part IN ({placeholders})", material_codes or [""])
-            customer_material_keys = []
-            for customer_code in customer_codes:
-                placeholders = ",".join("?" for _ in material_codes) or "?"
-                customer_material_keys.extend(rows(f"SELECT * FROM dbo.cp_mstr WHERE cp_cust = ? AND cp_part IN ({placeholders})", [customer_code, *(material_codes or [""])]))
+            customers = by_codes("cm_mstr", "cm_addr", customer_codes)
+            materials = by_codes("pt_mstr", "pt_part", material_codes)
+            customer_material_keys = [row for row in by_codes("cp_mstr", "cp_part", material_codes)
+                                      if clean(row.get("cp_cust")) in customer_codes]
             uom_codes = sorted({clean(value) for row in headers + materials + customer_material_keys for value in (row.get("sc_um"), row.get("pt_um"), row.get("pt_um_sl"), row.get("cp_um")) if clean(value)})
             product_line_codes = sorted({clean(row.get("pt_prod_line")) for row in materials if clean(row.get("pt_prod_line"))})
             location_codes = sorted({clean(row.get("pt_loc")) for row in materials if clean(row.get("pt_loc"))})
@@ -125,7 +125,7 @@ class Command(BaseCommand):
             if not currency:
                 currency = Currency.objects.create(code=key(row.get("cm_curr")) or "RMB", name=key(row.get("cm_curr")) or "人民币", status=ApprovalStatus.APPROVED, created_by="legacy-import")
                 currencies[key(currency.code)] = currency
-            Partner.objects.update_or_create(code=code, defaults={
+            Partner.objects.get_or_create(code=code, defaults={
                 "name": clean(row.get("cm_name")) or code, "short_name": clean(row.get("cm_sort")) or clean(row.get("cm_name")) or code,
                 "kind": "customer", "currency": currency, "address": clean(row.get("cm_txt_run")),
                 "invoice_address": clean(row.get("cm_txt_inv")), "delivery_address": clean(row.get("cm_txt_ship")),
@@ -162,12 +162,20 @@ class Command(BaseCommand):
             categories[key(code)] = ProductCategory.objects.create(code=code, name=clean(row.get("pl_desc")) or code, default_uom=default_uom, default_location=default_location, code_prefix=code, status=ApprovalStatus.APPROVED, created_by="legacy-import")
         for row in source.get("materials", []):
             code = clean(row.get("pt_part"))
-            if not code or Material.objects.filter(code=code).exists():
+            if not code:
                 continue
             category = categories.get(key(row.get("pt_prod_line")))
             uom = uoms.get(key(row.get("pt_um"))) or (category.default_uom if category else None)
             location = locations.get(key(row.get("pt_loc"))) or (category.default_location if category else None)
             if not category or not uom or not location:
+                continue
+            existing = Material.objects.filter(code=code).first()
+            if existing:
+                # Source-managed masters follow pt_mstr.pt_prod_line; keep local edits intact.
+                if (existing.created_by in {"dgyzx1-import", "legacy-import"}
+                        and existing.updated_by in {"", "dgyzx1-import", "legacy-import"}
+                        and existing.category_id != category.id):
+                    Material.objects.filter(pk=existing.pk).update(category_id=category.id)
                 continue
             Material.objects.create(code=code, name=clean(row.get("pt_desc1")) or code, specification=clean(row.get("pt_spec")), category=category, uom=uom, default_location=location, active=bool(row.get("pt_status")), tax_code="", status=ApprovalStatus.APPROVED, created_by=clean(row.get("pt_crt_by")) or "legacy-import")
         customer_map = {key(row.code): row for row in Partner.objects.filter(kind__in=("customer", "both"))}
@@ -178,7 +186,7 @@ class Command(BaseCommand):
             code = clean(row.get("cp_cust_part"))
             if not customer or not material or not code:
                 continue
-            CustomerMaterial.objects.update_or_create(customer=customer, material=material, customer_code=code, defaults={
+            CustomerMaterial.objects.get_or_create(customer=customer, material=material, customer_code=code, defaults={
                 "customer_name": clean(row.get("cp_cust_desc")), "customer_uom": uoms.get(key(row.get("cp_um"))),
                 "customer_uom_rate_m": row.get("cp_um_rate_m") or Decimal("1"), "customer_uom_rate_d": row.get("cp_um_rate_d") or Decimal("1"),
                 "enabled": True, "created_by": clean(row.get("cp_crt_by")) or "legacy-import",
@@ -276,19 +284,28 @@ class Command(BaseCommand):
                 uom = report["local"]["uoms"][key(row.get("sc_um"))]
                 relationship_key = (key(row.get("sc_cust")), key(row.get("sc_part")), key(row.get("sc_cust_part")))
                 customer_material = report["local_customer_materials"].get(relationship_key)
+                existing = SalesQuote.objects.filter(number=clean(row.get("sc_nbr"))).first()
+                if existing and existing.source_object != "dgyzx1.sc_mstr":
+                    old_lines = list(existing.lines.select_related("material"))
+                    if (existing.customer_id != customer.id or existing.currency_id != currency.id
+                            or len(old_lines) != 1 or old_lines[0].material_id != material.id
+                            or old_lines[0].customer_material_code != clean(row.get("sc_cust_part"))
+                            or existing.created_by != clean(row.get("sc_crt_by"))):
+                        raise CommandError(f"同号本地报价身份冲突，整批取消：{existing.number}")
                 quote, _ = SalesQuote.objects.update_or_create(number=clean(row.get("sc_nbr")), defaults={
                     "customer": customer, "currency": currency,
                     "effective_date": row["sc_start"].date() if isinstance(row.get("sc_start"), datetime) else row.get("sc_start"),
                     "expiry_date": expiry(row.get("sc_expire")), "tax_included": bool(row.get("sc_vat")),
-                    "tax_rate": row.get("sc_vat_rate") or Decimal("0"), "discount_rate": row.get("sc_disc") or Decimal("100"),
+                    "tax_rate": row.get("sc_vat_rate") or Decimal("0"), "discount_rate": row.get("sc_disc") if row.get("sc_disc") is not None else Decimal("100"),
                     "backup_ratio": row.get("sc_spare_pct") or Decimal("0"),
                     "usage": clean(row.get("sc_qtype")), "notes": clean(row.get("sc_rmks")),
                     "modification_count": row.get("sc_mod_times") or 0, "created_by": clean(row.get("sc_crt_by")),
-                    "updated_by": clean(row.get("sc_mod_by")), "source_object": "sc_mstr", **self.workflow(row),
+                    "updated_by": clean(row.get("sc_mod_by")), "source_object": "dgyzx1.sc_mstr", "source_snapshot": json.loads(json.dumps(row, default=str)), **self.workflow(row),
                 })
                 SalesQuote.objects.filter(pk=quote.pk).update(created_at=aware(row.get("sc_crt_date")), updated_at=aware(row.get("sc_mod_date")))
                 line, _ = SalesQuoteLine.objects.update_or_create(quote=quote, line_number=10, defaults={
                     "material": material, "customer_material": customer_material, "uom": uom, "quantity": Decimal("1"),
+                    "price_type": clean(row.get("sc_price_type")) or "1",
                     "unit_price": row.get("sc_price") or Decimal("0"), "tax_rate": row.get("sc_vat_rate") or Decimal("0"),
                     "uom_rate_m": row.get("sc_um_rate_m") or Decimal("1"), "uom_rate_d": row.get("sc_um_rate_d") or Decimal("1"),
                     "customer_material_code": clean(row.get("sc_cust_part")),
@@ -316,11 +333,14 @@ class Command(BaseCommand):
                 imported += 1
         return imported
 
+    @transaction.atomic
     def handle(self, *args, **options):
         limit = options["limit"]
         if limit < 1 or limit > 5000:
             raise CommandError("--limit 必须在 1 到 5000 之间")
-        source = self.read_source(limit, options.get("source_file"))
+        source = self.read_source(limit, options.get("source_file"), options.get("category"), options.get("profile"))
+        if options.get("export_source"):
+            options["export_source"].write_text(json.dumps(source, ensure_ascii=False, default=str), encoding="utf-8")
         if options["bootstrap_dependencies"] and not options["commit"]:
             raise CommandError("--bootstrap-dependencies 必须与 --commit 一起使用")
         if options["bootstrap_dependencies"]:

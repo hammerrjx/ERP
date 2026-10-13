@@ -11,16 +11,19 @@ from backend.domain.sales import (
 from backend.domain.delivery import DeliveryOrder, DeliveryOrderLine, SalesReturn, SalesReturnLine
 from backend.domain.system import ApprovalStatus
 from .api_common import ApprovalViewSet, ensure_editable, make_viewset
+from .sales_pagination import PagedSalesMixin
 from .serializers.delivery import (
     DeliveryOrderDetailSerializer,
     DeliveryOrderLineSerializer,
     DeliveryOrderSerializer,
     SalesReturnLineSerializer,
     SalesReturnSerializer,
+    SalesReturnDetailSerializer,
 )
 
 
-class DeliveryOrderViewSet(ApprovalViewSet):
+class DeliveryOrderViewSet(PagedSalesMixin, ApprovalViewSet):
+    search_fields = ("number", "customer__code", "customer__name", "customer_po", "srm_number")
     queryset = DeliveryOrder.objects.select_related("customer", "sales_order", "source_location").prefetch_related(
         "lines__sales_order_line__order__currency",
         "lines__sales_order_line__inventory_uom",
@@ -33,6 +36,10 @@ class DeliveryOrderViewSet(ApprovalViewSet):
         "lines__sales_order_line__uom",
     )
     serializer_class = DeliveryOrderSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset.prefetch_related(None) if self.action == "list" else queryset
 
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):
@@ -73,6 +80,8 @@ class DeliveryOrderViewSet(ApprovalViewSet):
         if existing:
             if existing.owner_id != request.user.pk:
                 raise serializers.ValidationError("取号请求不属于当前用户")
+            if existing.delivery_date.strftime("%Y%m") != day.strftime("%Y%m"):
+                raise serializers.ValidationError("送货月份已变化，请使用新的取号请求")
             return response.Response({"reservation": str(existing.pk), "number": existing.number})
         try:
             number = DeliveryOrderSequence.next_number(day)
@@ -281,9 +290,29 @@ class SalesReturnViewSet(make_viewset(SalesReturn, SalesReturnSerializer)):
     queryset = SalesReturn.objects.all()
     serializer_class = SalesReturnSerializer
 
+    def get_serializer_class(self):
+        return SalesReturnDetailSerializer if self.action == "retrieve" else SalesReturnSerializer
+
+    def perform_create(self, serializer):
+        if serializer.validated_data.get('no_order', True):
+            raise serializers.ValidationError('无订单退货请使用无订单退货整单页面保存')
+        super().perform_create(serializer)
+
+    def perform_update(self, serializer):
+        if SalesReturn.objects.filter(pk=serializer.instance.pk, no_order=True).exists() or serializer.validated_data.get('no_order', False):
+            raise serializers.ValidationError('无订单退货请使用无订单退货整单页面保存')
+        super().perform_update(serializer)
+
+    def destroy(self, request, *args, **kwargs):
+        if self.get_object().no_order:
+            raise serializers.ValidationError('无订单退货请使用无订单退货页面删除')
+        return super().destroy(request, *args, **kwargs)
+
     @transaction.atomic
     def transition(self, obj, action, actor="", reason=""):
         obj = SalesReturn.objects.select_for_update().get(pk=obj.pk)
+        if obj.no_order:
+            raise serializers.ValidationError('无订单退货请使用无订单退货页面操作')
         if action == "approve" and obj.status == ApprovalStatus.APPROVED:
             return response.Response(self.get_serializer(obj).data)
         return super().transition(obj, action, actor, reason)
@@ -294,6 +323,8 @@ class SalesReturnLineViewSet(make_viewset(SalesReturnLine, SalesReturnLineSerial
         parents = [request.data.get("sales_return"), getattr(instance, "sales_return_id", None)]
         parent_ids = [serializers.IntegerField(min_value=1).run_validation(value) for value in parents if value]
         list(SalesReturn.objects.select_for_update().filter(pk__in=parent_ids).order_by("pk"))
+        if SalesReturn.objects.filter(pk__in=parent_ids, no_order=True).exists():
+            raise serializers.ValidationError('无订单退货明细请通过整单页面保存')
         raw_orders = [request.data.get("sales_order_line"), getattr(instance, "sales_order_line_id", None)]
         raw_deliveries = [request.data.get("source_delivery_line"), getattr(instance, "source_delivery_line_id", None)]
         ids = []
@@ -313,3 +344,9 @@ class SalesReturnLineViewSet(make_viewset(SalesReturnLine, SalesReturnLineSerial
     def update(self, request, *args, **kwargs):
         self.lock_source(request, self.get_object())
         return super().update(request, *args, **kwargs)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        line = self.get_object()
+        self.lock_source(request, line)
+        return super().destroy(request, *args, **kwargs)

@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from backend.models import (
     ApprovalStatus, Currency, Location, Material, Partner, ProductCategory,
-    RoutingOperation, SupplierQuote, SupplierQuoteLine, Uom, UomCategory,
+    PartnerContact, RoutingOperation, SupplierQuote, SupplierQuoteLine, Uom, UomCategory,
 )
 
 
@@ -22,9 +22,23 @@ def key(value):
     return clean(value).upper()
 
 
+def source_yes(value):
+    if isinstance(value, bool):
+        return value
+    return key(value) in {"1", "Y", "T", "TRUE"}
+
+
 def source_date(value):
     if isinstance(value, datetime):
         return value.date()
+    return value
+
+
+def source_url(value):
+    """Normalise a legacy website before it reaches Django's URL validator."""
+    value = clean(value)[:200]
+    if value and "://" not in value:
+        return f"https://{value}"
     return value
 
 
@@ -242,14 +256,38 @@ class Command(BaseCommand):
             suppliers[key(code)], _ = Partner.objects.update_or_create(code=code, defaults={
                 "name": clean(row.get("vd_name")) or code, "short_name": clean(row.get("vd_sort")) or clean(row.get("vd_name")) or code,
                 "kind": Partner.PartnerKind.SUPPLIER, "currency": currency, "address": clean(row.get("vd_txt"))[:240],
+                "website": source_url(row.get("vd_www")),
                 "buyer": clean(row.get("vd_buyer")), "payment_method": clean(row.get("vd_cr_terms")) or "原ERP未设置",
                 "tax_rate": row.get("vd_vat") or Decimal("0"), "quote_method": clean(row.get("vd_quot_type")),
                 "invoice_type": clean(row.get("vd_inv_type")), "tax_calculation_method": clean(row.get("vd_vat_method")),
                 "payment_bank": clean(row.get("vd_bank")), "bank_account": clean(row.get("vd_bank_acct")),
-                "notes": clean(row.get("vd_rmks")), "payment_hold": bool(row.get("vd_hold")),
-                "internal_company": bool(row.get("vd_isinternal")), "status": ApprovalStatus.APPROVED,
-                "created_by": clean(row.get("vd_crt_by")) or "dgyzx1-import",
+                "notes": clean(row.get("vd_rmks")), "payment_hold": source_yes(row.get("vd_hold")),
+                "internal_company": source_yes(row.get("vd_isinternal")), "strategic_supplier": clean(row.get("vd_strategic")) == '2',
+                "quote_tax_included": clean(row.get("vd_quot_type")) == '1',
+                "backup_ratio": row.get("vd_spare_pct") or Decimal("0"), "over_receipt_ratio": row.get("vd_tol_pct") or Decimal("0"),
+                "service_score": row.get("vd_service") or Decimal("0"), "supplier_type": clean(row.get("vd_kind")),
+                "material_price_method": clean(row.get("vd_mtl_sales")), "material_price_factor": row.get("vd_mtl_rate") if row.get("vd_mtl_rate") is not None else Decimal("1"),
+                "quoted_settlement": source_yes(row.get("vd_bid_settle")), "tax_number": clean(row.get("vd_reg_code")),
+                "legal_person": clean(row.get("vd_comp_owner")), "registered_capital": row.get("vd_reg_fund") or Decimal("0"),
+                "annual_revenue": row.get("vd_tunrover") or Decimal("0"), "opening_date": source_date(row.get("vd_open_date")),
+                "employee_count": row.get("vd_employees") or 0, "three_certificates": source_yes(row.get("vd_3c")),
+                "business_license": source_yes(row.get("vd_open")),
+                "status": ApprovalStatus.VOID if source_yes(row.get("vd_invalid")) else (ApprovalStatus.APPROVED if source_yes(row.get("vd_allow")) else (ApprovalStatus.PENDING if source_yes(row.get("vd_pst")) else ApprovalStatus.DRAFT)),
+                "is_confirmed": source_yes(row.get("vd_pst")), "confirmed_by": clean(row.get("vd_pst_by")), "confirmed_at": aware(row.get("vd_pst_date")),
+                "approved_by": clean(row.get("vd_allow_by")), "approved_at": aware(row.get("vd_allow_date")),
+                "created_by": clean(row.get("vd_crt_by")) or "dgyzx1-import", "updated_by": clean(row.get("vd_mod_by")),
             })
+            PartnerContact.objects.filter(partner=suppliers[key(code)]).delete()
+            PartnerContact.objects.bulk_create([
+                PartnerContact(
+                    partner=suppliers[key(code)], name=clean(row.get(name)), phone=clean(row.get(phone)),
+                    fax=clean(row.get(fax)), email=clean(row.get(email)), is_primary=index == 0,
+                )
+                for index, (name, phone, fax, email) in enumerate((
+                    ("vd_attn", "vd_tele", "vd_fax", "vd_email"),
+                    ("vd_attn2", "vd_tele2", "vd_fax2", "vd_email2"),
+                )) if clean(row.get(name))
+            ])
             imported["供应商"] += 1
         materials = {key(item.code): item for item in Material.objects.all()}
         for row in source["materials"]:

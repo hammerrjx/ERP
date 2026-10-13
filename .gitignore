@@ -13,6 +13,14 @@ __pycache__/
 .env
 backend/db.sqlite3
 *.sqlite3
+*.sqlite
+*.sqlite3-*
+*.sqlite-*
+*.db
+*.db-*
+*.mdb
+*.accdb
+*.bak
 backend/media/
 backups/
 
@@ -24,8 +32,16 @@ htmlcov/
 # Local review and generated artifacts
 tmp/
 outputs/
+output/
+docs/
+*.md
+!README.md
 .codex/
 .memorax-code/
+.occai/
+.workbuddy/
+artifacts/
+*.log
 # Local conversation history and investigation archives
 /archive/
 # Local environment variants

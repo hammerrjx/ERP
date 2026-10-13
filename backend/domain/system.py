@@ -11,7 +11,7 @@ from .base import ApprovalStatus, AuditedModel, AuditEvent  # noqa: F401
 
 
 class Employee(AuditedModel):
-    """Employee/business-person master synchronized from the legacy user table."""
+    """Unified legacy USER master: a person may optionally have a login account."""
 
     code = models.CharField(max_length=32, unique=True)
     name = models.CharField(max_length=80)
@@ -21,14 +21,19 @@ class Employee(AuditedModel):
     is_employee = models.BooleanField(default=True)
     is_locked = models.BooleanField(default=False)
     is_left = models.BooleanField(default=False)
+    agent_code = models.CharField(max_length=32, blank=True)
+    allowed_ip = models.CharField(max_length=255, blank=True)
     phone = models.CharField(max_length=50, blank=True)
     mobile = models.CharField(max_length=50, blank=True)
     email = models.EmailField(blank=True)
     qq = models.CharField(max_length=30, blank=True)
     wechat = models.CharField(max_length=50, blank=True)
+    other_contact = models.CharField(max_length=50, blank=True)
     position = models.CharField(max_length=50, blank=True)
     language = models.CharField(max_length=16, blank=True)
+    user_type = models.CharField(max_length=30, blank=True)
     company = models.CharField(max_length=160, blank=True)
+    partner_code = models.CharField(max_length=32, blank=True)
     source_object = models.CharField(max_length=40, default="usr_mstr")
 
     class Meta:
@@ -36,6 +41,16 @@ class Employee(AuditedModel):
 
     def __str__(self):
         return f"{self.code} {self.name}".strip()
+
+
+class UserEmployeeLink(models.Model):
+    """Maps the new application's login account to one legacy USER profile."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="employee_link")
+    employee = models.OneToOneField(Employee, on_delete=models.PROTECT, related_name="account_link")
+
+    class Meta:
+        ordering = ("user__username",)
 
 
 class Department(AuditedModel):

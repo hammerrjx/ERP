@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { api, upload, download, ApiError } from './client.js'
+import { api, upload, download, ApiError } from '../../src/api/client.js'
 
 test('JSON, uploads and exports preserve server errors', async context => {
   const details = { quantity: ['Invalid quantity'] }

@@ -1,6 +1,10 @@
 """Django model discovery and compatibility imports; implementations live in domain."""
+from .domain.document_numbers import DocumentNumberSequence
 
 from .domain.finance import PayableVoucher, PayableVoucherLine
+from .domain.inventory_reports import InventoryReportBatch, InventoryReportRow, InventoryReportLookup
+from .domain.inventory_analysis import InventoryAnalysisSnapshot, InventoryAnalysisPart
+from .domain.warehouse_documents import InventoryDocument, InventoryDocumentLine, LegacyInventoryRecord, InventoryDictionary
 from .domain.base import (
     ApprovalStatus,
     AuditedModel,
@@ -14,6 +18,9 @@ from .domain.delivery import (
     DeliveryOrderSequence,
     SalesReturn,
     SalesReturnLine,
+    SalesReturnSequence,
+    SalesReturnHistory,
+    InventoryPostingControl,
 )
 from .domain.engineering import (
     BillOfMaterial,
@@ -30,6 +37,7 @@ from .domain.inventory import (
     StockTransferLine,
 )
 from .domain.master_data import (
+    AccountingAccount,
     BusinessGroup,
     Company,
     Currency,
@@ -55,8 +63,12 @@ from .domain.purchase import (
     GoodsReceiptLine,
     PurchaseOrder,
     PurchaseOrderLine,
+    PurchaseOrderAllocation,
+    PurchaseGeneration,
     PurchaseRequisition,
     PurchaseRequisitionLine,
+    PurchaseRequisitionSource,
+    PurchaseRequisitionSequence,
     PurchaseReturn,
     PurchaseReturnLine,
     RequestForQuotation,
@@ -76,12 +88,14 @@ from .domain.sales import (
     SalesQuoteSequence,
     SalesQuoteTier,
 )
+from .domain.trade_mrp import TradeMrpRun, TradeMrpResult, TradeMrpSiteParameter
 from .domain.system import (
     ApprovalRule,
     Department,
     Employee,
     Role,
     UserRole,
+    UserEmployeeLink,
 )
 
 __all__ = (
@@ -112,6 +126,7 @@ __all__ = (
     "Department",
     "Role",
     "UserRole",
+    "UserEmployeeLink",
     "ApprovalRule",
     "BillOfMaterial",
     "BomLine",
@@ -153,4 +168,7 @@ __all__ = (
     "DeliveryOrderLine",
     "SalesReturn",
     "SalesReturnLine",
+    "TradeMrpRun",
+    "TradeMrpResult",
+    "TradeMrpSiteParameter",
 )

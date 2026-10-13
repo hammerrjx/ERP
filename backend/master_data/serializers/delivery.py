@@ -1,12 +1,18 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Max
 from rest_framework import serializers
 
 from backend.models import DeliveryOrder, DeliveryOrderLine, SalesReturn, SalesReturnLine
 
-from .common import BaseSerializer, serializer_for
+from .common import BaseSerializer
 
 
 class DeliveryOrderSerializer(BaseSerializer):
+    def validate_delivery_date(self, value):
+        if self.instance and value.strftime("%Y%m") != self.instance.delivery_date.strftime("%Y%m"):
+            raise serializers.ValidationError("已保存送货单不能跨月修改日期，请按新日期另建送货单")
+        return value
+
     customer_code = serializers.CharField(source="customer.code", read_only=True)
     customer_name = serializers.CharField(source="customer.name", read_only=True)
 
@@ -34,6 +40,8 @@ class DeliveryOrderLineSerializer(BaseSerializer):
     def validate(self, attrs):
         from backend.delivery import validate_quantities
 
+        if self.instance is None and attrs.get("delivery"):
+            attrs["line_number"] = (attrs["delivery"].lines.aggregate(number=Max("line_number"))["number"] or 0) + 10
         if "actual_quantity" in attrs and "srm_quantity" not in attrs:
             attrs["srm_quantity"] = attrs["actual_quantity"]
         attrs = super().validate(attrs)
@@ -51,6 +59,7 @@ class DeliveryOrderLineSerializer(BaseSerializer):
     material_specification = serializers.CharField(source="material.specification", read_only=True)
     uom_code = serializers.CharField(source="uom.code", read_only=True)
     order_number = serializers.CharField(source="sales_order_line.order.number", read_only=True)
+    order_line_number = serializers.IntegerField(source="sales_order_line.line_number", read_only=True)
     customer_po = serializers.CharField(source="sales_order_line.order.customer_po", read_only=True)
     ordered_quantity = serializers.DecimalField(
         source="sales_order_line.quantity", max_digits=19, decimal_places=8, read_only=True
@@ -67,6 +76,7 @@ class DeliveryOrderLineSerializer(BaseSerializer):
         model = DeliveryOrderLine
         fields = "__all__"
         read_only_fields = (
+            "line_number",
             "source_snapshot",
             "modification_count",
             "created_by",
@@ -125,7 +135,50 @@ class DeliveryOrderDetailSerializer(DeliveryOrderSerializer):
         return result
 
 
-SalesReturnSerializer = serializer_for(SalesReturn)
+class SalesReturnSerializer(BaseSerializer):
+    class Meta:
+        model = SalesReturn
+        fields = "__all__"
+        read_only_fields = ("number", "posted", "stock_posted", "posting_version", "revision", "status", "created_by", "created_at", "updated_by", "updated_at", "approved_by", "approved_at", "confirmed_by", "confirmed_at", "is_signed", "signed_by", "signed_at", "source_key", "downstream_references")
 
 
-SalesReturnLineSerializer = serializer_for(SalesReturnLine)
+class SalesReturnLineSerializer(BaseSerializer):
+    material_code = serializers.CharField(source="material.code", read_only=True)
+    material_name = serializers.CharField(read_only=True)
+    material_specification = serializers.CharField(read_only=True)
+    customer_material_code = serializers.CharField(read_only=True)
+    terminal_customer_code = serializers.CharField(read_only=True)
+    terminal_customer_name = serializers.CharField(read_only=True)
+    inventory_uom = serializers.PrimaryKeyRelatedField(read_only=True)
+    uom_rate_m = serializers.DecimalField(max_digits=19, decimal_places=8, read_only=True)
+    uom_rate_d = serializers.DecimalField(max_digits=19, decimal_places=8, read_only=True)
+
+    class Meta:
+        model = SalesReturnLine
+        fields = "__all__"
+        read_only_fields = ("line_number", "material_name", "material_specification", "customer_material_code", "terminal_customer_code", "terminal_customer_name", "inventory_uom", "uom_rate_m", "uom_rate_d", "created_by", "created_at", "updated_by", "updated_at", "modification_count")
+
+    def validate(self, attrs):
+        if self.instance is None and attrs.get("sales_return"):
+            attrs["line_number"] = (attrs["sales_return"].lines.aggregate(number=Max("line_number"))["number"] or 0) + 10
+        attrs = super().validate(attrs)
+        if attrs.get("sales_return") and attrs.get("material") and attrs["sales_return"].no_order:
+            from backend.no_order_returns import derive_line
+            derived = SalesReturnLine(**attrs)
+            derive_line(derived)
+            attrs.update({key: getattr(derived, key) for key in (
+                "customer_material", "customer_material_code", "terminal_customer_code", "terminal_customer_name",
+                "material_name", "material_specification", "inventory_uom", "uom", "uom_rate_m", "uom_rate_d")})
+        if self.instance and self.instance.sales_return.posted:
+            raise serializers.ValidationError("已审核退货明细不可修改")
+        return attrs
+
+
+class SalesReturnDetailSerializer(SalesReturnSerializer):
+    lines = serializers.SerializerMethodField()
+
+    class Meta(SalesReturnSerializer.Meta):
+        fields = "__all__"
+
+    def get_lines(self, obj):
+        return SalesReturnLineSerializer(obj.lines.select_related("material", "customer_material", "inventory_uom", "uom"), many=True).data

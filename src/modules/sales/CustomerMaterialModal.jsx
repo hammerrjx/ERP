@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { Check, X } from 'lucide-react'
 import { field } from '../../app/config'
-import { Field } from '../../components/Field'
+import { Field, SearchableLookup } from '../../components/Field'
 import { AsyncForm } from '../../components/PendingControls'
+
+import { useSalesLookups } from './useSalesLookups'
 
 const customerMaterialFields = [
   field('customer', '客户代码', { lookup: 'customers', required: true }),
@@ -24,16 +26,17 @@ const customerMaterialFields = [
   field('created_at', '录入时间', { kind: 'readonly' }),
 ]
 
-export function CustomerMaterialModal({ lookups, record, onClose, onSave }) {
+export function CustomerMaterialModal({ token, lookups, record, onClose, onSave }) {
   const [values, setValues] = useState({
     customer_uom_rate_m: 1,
     customer_uom_rate_d: 1,
     enabled: true,
     ...(record || {}),
   })
+  const lookup = useSalesLookups(token, values.customer, [values], lookups)
   const update = (key, value) => {
     if (key === 'material') {
-      const material = (lookups.materials || []).find((item) => item.id === Number(value))
+      const material = lookup.materials.find((item) => item.id === Number(value))
       setValues((current) => ({
         ...current,
         material: value,
@@ -63,9 +66,11 @@ export function CustomerMaterialModal({ lookups, record, onClose, onSave }) {
             <X size={19} />
           </button>
         </div>
+        {lookup.error && <div role="alert">{lookup.error}</div>}
         <div className="form-grid">
           {customerMaterialFields.map((item) => (
-            <Field
+            item.key === 'material' ? <SearchableLookup key={item.key} label={item.label} value={values.material} required
+              options={lookup.materials} onSearch={q => lookup.search('materials', q)} onChange={value => update('material', value)} /> : <Field
               key={item.key}
               field={item}
               value={values[item.key] ?? ''}

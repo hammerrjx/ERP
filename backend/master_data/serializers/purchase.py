@@ -225,9 +225,22 @@ PurchaseOrderSerializer = serializer_for(PurchaseOrder)
 
 
 class PurchaseOrderLineSerializer(BaseSerializer):
+    source_requisition_number = serializers.CharField(source="source_requisition_line.requisition.number", read_only=True)
+    source_requisition_line_number = serializers.IntegerField(source="source_requisition_line.line_number", read_only=True)
+    source_material_code = serializers.CharField(source="source_requisition_line.material_snapshot.pt_part", read_only=True)
+    source_material_name = serializers.CharField(source="source_requisition_line.material_snapshot.pt_desc1", read_only=True)
+
     class Meta:
         model = PurchaseOrderLine
         fields = "__all__"
+        read_only_fields = (
+            "source_requisition_number", "source_requisition_line_number", "source_material_code", "source_material_name",
+            "received_quantity", "returned_quantity", "source_object",
+            "allocation_managed", "snapshot", "uom_rate_m", "uom_rate_d", "created_by", "created_at",
+            "updated_by", "updated_at", "modification_count", "accepted_quantity", "accepted_inventory_quantity",
+            "received_spare_quantity", "accepted_spare_quantity", "accepted_spare_inventory_quantity", "returned_spare_quantity",
+            "closed_by", "closed_at", "line_status", "minimum_price",
+        )
 
     def validate(self, attrs):
         quote = attrs.get("source_supplier_quote") or getattr(self.instance, "source_supplier_quote", None)

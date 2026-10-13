@@ -23,9 +23,10 @@ async function responseData(response, fallback = '请求失败') {
   return data
 }
 
-export function api(path, { token, method = 'GET', body } = {}) {
+export function api(path, { token, method = 'GET', body, signal } = {}) {
   return fetch(`${API_ROOT}${path}`, {
     method,
+    signal,
     headers: {
       ...(token ? { Authorization: `Token ${token}` } : {}),
       ...(body ? { 'Content-Type': 'application/json' } : {})

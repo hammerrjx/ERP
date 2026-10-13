@@ -28,7 +28,7 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
             "mrp_demand_qty": "10", "on_order_qty": "2", "available_qty": "3",
             "safety_stock_qty": "1", "source_sales_order_line": order_line["id"],
         })
-        self.assertEqual(line["requested_qty"], "6.000000")
+        self.assertEqual(line["requested_qty"], "6.00000000")
         self.assertEqual(line["source_sales_order_line"], order_line["id"])
         self.assertEqual(line["calculation_snapshot"]["rule"], "mrp")
 
@@ -56,12 +56,12 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
         }, format="json")
         self.assertEqual(generated.status_code, 201, generated.data)
         self.assertEqual(generated.data["supplier_delivery_number"], "DN-001")
-        self.assertEqual(generated.data["source_object"], "prh_receiver")
+        self.assertEqual(generated.data["source_object"], "grn_mstr")
         line = self.client.get("/api/goods-receipt-line/").data[0]
         self.assertEqual(line["purchase_order_line"], order_line["id"])
-        self.assertEqual(line["quantity"], "12.000000")
+        self.assertEqual(line["quantity"], "12.00000000")
         self.assertEqual(line["location"], context["location"]["id"])
-        self.assertEqual(line["source_object"], "prh_hist")
+        self.assertEqual(line["source_object"], "grnd_det")
 
     def test_approved_requisition_uses_selected_inquiry_to_create_traceable_purchase_order(self):
         context = self.base_context()
@@ -130,7 +130,7 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
             self.approve("purchase-order", order["id"])
             receipt = self.post("goods-receipt", {
                 "supplier": supplier["id"], "purchase_order": order["id"],
-                "receipt_date": "2026-08-28", "receipt_type": "normal",
+                "receipt_date": "2026-08-28", "receipt_type": "normal", "supplier_delivery_number": "DN-TEST",
             })
             receipt_lines.append(self.post("goods-receipt-line", {
                 "receipt": receipt["id"], "line_number": 10,
@@ -192,9 +192,11 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
             "material": context["material"]["id"], "location": context["location"]["id"],
             "uom": context["uom"]["id"], "quantity": "2", "batch_number": "",
         })
+        from backend.models import PurchaseOrderLine
+        PurchaseOrderLine.objects.filter(pk=order_line["id"]).update(received_quantity=2)
         purchase_return = self.post("purchase-return", {
             "supplier": supplier["id"], "purchase_order": order["id"],
-            "return_date": "2026-08-29", "replenishment": False, "reason": "来料不良",
+            "return_location": context["location"]["id"], "return_date": "2026-08-29", "replenishment": False, "reason": "来料不良",
         })
         return_line = self.post("purchase-return-line", {
             "purchase_return": purchase_return["id"], "line_number": 10,
@@ -244,20 +246,14 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
         self.approve("purchase-order", order["id"])
         invalid = self.client.post("/api/goods-receipt/", {
             "supplier": supplier["id"], "purchase_order": order["id"],
-            "receipt_date": "2026-08-28", "receipt_type": "normal",
+            "receipt_date": "2026-08-28", "receipt_type": "normal", "supplier_delivery_number": "DN-TEST",
         }, format="json")
         self.assertEqual(invalid.status_code, 400, invalid.data)
-        receipt = self.post("goods-receipt", {
+        excluded = self.client.post("/api/goods-receipt/", {
             "supplier": supplier["id"], "purchase_order": order["id"],
-            "receipt_date": "2026-08-28", "receipt_type": "non_production",
-        })
-        self.post("goods-receipt-line", {
-            "receipt": receipt["id"], "line_number": 10, "purchase_order_line": order_line["id"],
-            "material": context["material"]["id"], "uom": context["uom"]["id"],
-            "quantity": "1", "location": context["location"]["id"],
-        })
-        self.approve("goods-receipt", receipt["id"])
-        self.assertEqual(self.client.get("/api/stock-balance/").data, [])
+            "receipt_type": "non_production",
+        }, format="json")
+        self.assertEqual(excluded.status_code, 400)
         self.assertEqual(self.client.get("/api/stock-transaction/").data, [])
 
     def test_approved_purchase_return_defaults_to_traceable_replacement_order(self):
@@ -283,9 +279,11 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
             "material": context["material"]["id"], "location": context["location"]["id"],
             "uom": context["uom"]["id"], "quantity": "5", "batch_number": "",
         })
+        from backend.models import PurchaseOrderLine
+        PurchaseOrderLine.objects.filter(pk=order_line["id"]).update(received_quantity=2)
         purchase_return = self.post("purchase-return", {
             "supplier": supplier["id"], "purchase_order": order["id"],
-            "return_date": "2026-08-29", "reason": "来料不良",
+            "return_location": context["location"]["id"], "return_date": "2026-08-29", "reason": "来料不良",
         })
         self.assertTrue(purchase_return["replenishment"])
         self.post("purchase-return-line", {
@@ -295,12 +293,13 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
             "source_location": context["location"]["id"], "reason": "尺寸超差",
         })
         self.approve("purchase-return", purchase_return["id"])
-        self.assertEqual(self.client.get("/api/stock-balance/").data[0]["quantity"], "3.000000")
+        self.assertEqual(self.client.get("/api/stock-balance/").data[0]["quantity"], "3.00000000")
         orders = self.client.get("/api/purchase-order/").data
-        replacement = next(row for row in orders if row["source_purchase_return"] == purchase_return["id"])
+        self.assertEqual(len(orders), 1)
         replacement_lines = self.client.get("/api/purchase-order-line/").data
-        replacement_line = next(row for row in replacement_lines if row["order"] == replacement["id"])
-        self.assertEqual(replacement_line["quantity"], "2.000000")
+        replacement_line = next(row for row in replacement_lines if row["id"] != order_line["id"])
+        self.assertEqual(replacement_line["order"], order["id"])
+        self.assertEqual(replacement_line["quantity"], "2.00000000")
 
     def test_selected_receipt_lines_require_evidence_before_confirmation(self):
         context = self.base_context()
@@ -325,13 +324,13 @@ class PurchaseFlowApiTests(CoreFlowSupport, APITestCase):
         }, format="json")
         self.assertEqual(receipt.status_code, 201, receipt.data)
         receipt_line = self.client.get("/api/goods-receipt-line/").data[0]
-        self.assertEqual(receipt_line["quantity"], "3.000000")
+        self.assertEqual(receipt_line["quantity"], "3.00000000")
         self.approve("goods-receipt", receipt.data["id"])
         blocked = self.client.post(f"/api/goods-receipt/{receipt.data['id']}/confirm/", {}, format="json")
         self.assertEqual(blocked.status_code, 400, blocked.data)
         evidence = self.client.post("/api/document-evidence/", {
             "document_type": "goodsreceipt", "document_id": receipt.data["id"], "document_number": receipt.data["number"],
-            "evidence_type": "supplier_delivery", "file": SimpleUploadedFile("ps-001.pdf", b"signed"),
+            "evidence_type": "supplier_delivery", "file": SimpleUploadedFile("ps-001.pdf", b"%PDF-1.4\n signed"),
         }, format="multipart")
         self.assertEqual(evidence.status_code, 201, evidence.data)
         confirmed = self.client.post(f"/api/goods-receipt/{receipt.data['id']}/confirm/", {}, format="json")

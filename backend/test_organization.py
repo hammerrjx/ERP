@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from rest_framework.test import APITestCase
 
+from backend.models import Employee, UserEmployeeLink
 from backend.test_support import SourceDatabaseIsolatedMixin, write_departments
 
 
@@ -89,6 +90,7 @@ class OrganizationApiTests(SourceDatabaseIsolatedMixin, APITestCase):
         self.assertEqual(denied.status_code, 403, denied.data)
 
     def test_legacy_access_import_uses_group_program_permissions_without_passwords(self):
+        Employee.objects.create(code="ST03", name="仓库用户")
         with TemporaryDirectory() as directory:
             source = Path(directory) / "legacy-access.json"
             source.write_text(json.dumps({
@@ -107,6 +109,7 @@ class OrganizationApiTests(SourceDatabaseIsolatedMixin, APITestCase):
 
         user = get_user_model().objects.get(username="ST03")
         self.assertFalse(user.has_usable_password())
+        self.assertEqual(UserEmployeeLink.objects.get(user=user).employee.code, "ST03")
         self.client.force_authenticate(user)
         self.assertEqual(self.client.get("/api/location/").status_code, 200)
         denied = self.client.post("/api/location/", {

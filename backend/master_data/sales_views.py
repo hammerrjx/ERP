@@ -2,7 +2,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import F, Q, Sum
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import decorators, response, serializers
 
@@ -14,6 +14,7 @@ from backend.domain.sales import (
     SalesQuoteLine,
 )
 from backend.domain.system import ApprovalStatus, AuditEvent
+from .sales_pagination import PagedSalesMixin
 from .api_common import ApprovalViewSet, ensure_editable, ensure_status_unchanged, make_viewset
 from .serializers.sales_quotes import (
     CustomerMaterialSerializer,
@@ -26,20 +27,12 @@ from .serializers.sales_orders import (
     SalesOrderSerializer,
     clean_sales_order,
 )
-from backend.models import (
-    Department,
-    PurchaseOrder,
-    PurchaseOrderLine,
-    PurchaseRequisition,
-    PurchaseRequisitionLine,
-    StockBalance,
-)
-from .serializers.purchase import (
-    PurchaseRequisitionSerializer,
-)
 
 
-class CustomerMaterialViewSet(make_viewset(CustomerMaterial, CustomerMaterialSerializer)):
+class CustomerMaterialViewSet(PagedSalesMixin, make_viewset(CustomerMaterial, CustomerMaterialSerializer)):
+    queryset = CustomerMaterial.objects.select_related("material", "customer")
+    search_fields = ("customer__code", "customer__name", "customer_code", "customer_name", "material__code", "material__name", "material__specification")
+
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user.get_username())
 
@@ -52,7 +45,16 @@ class CustomerMaterialViewSet(make_viewset(CustomerMaterial, CustomerMaterialSer
 SalesQuoteLineViewSet = make_viewset(SalesQuoteLine, SalesQuoteLineSerializer)
 
 
-class SalesOrderViewSet(ApprovalViewSet):
+class SalesOrderViewSet(PagedSalesMixin, ApprovalViewSet):
+    search_fields = (
+        "number",
+        "customer__code",
+        "customer__name",
+        "customer_po",
+        "lines__material__code",
+        "lines__customer_material__customer_code",
+        "lines__customer_material_name",
+    )
     queryset = SalesOrder.objects.select_related(
         "customer",
         "sales_person",
@@ -139,89 +141,15 @@ class SalesOrderViewSet(ApprovalViewSet):
         return response.Response(self.get_serializer(order).data)
 
     @decorators.action(detail=True, methods=["post"], url_path="generate-requisition")
-    @transaction.atomic
     def generate_requisition(self, request, pk=None):
-        order = self.get_object()
-        if order.status != ApprovalStatus.APPROVED:
-            raise serializers.ValidationError("只有已审核销售订单可以进行 MRP 请购分析")
-        department_id = request.data.get("department")
-        if not department_id:
-            raise serializers.ValidationError({"department": "请购部门必填"})
-        needed_date = request.data.get("needed_date") or timezone.localdate()
-        department = Department.objects.filter(pk=department_id).first()
-        if not department:
-            raise serializers.ValidationError({"department": "请购部门不存在"})
-        requisition = PurchaseRequisition.objects.create(
-            department=department,
-            request_date=timezone.localdate(),
-            needed_date=needed_date,
-            aggregation_mode=PurchaseRequisition.AggregationMode.NONE,
-            quantity_rule="mrp",
-            only_positive=True,
-            source_sales_order=order,
-            notes=request.data.get("notes", f"销售订单 {order.number} MRP 请购分析"),
-            created_by=request.user.get_username(),
-        )
-        created = 0
-        supply_by_material = {}
-        for line in order.lines.select_related("material", "uom"):
-            demand = max(line.quantity - line.delivered_quantity, Decimal("0"))
-            key = (line.material_id, line.uom_id)
-            if key not in supply_by_material:
-                on_order = sum(
-                    (
-                        max(item.quantity - item.received_quantity, Decimal("0"))
-                        for item in PurchaseOrderLine.objects.filter(
-                            material=line.material,
-                            uom=line.uom,
-                            order__status=ApprovalStatus.APPROVED,
-                        ).exclude(order__purchase_type=PurchaseOrder.PurchaseType.NON_PRODUCTION)
-                    ),
-                    Decimal("0"),
-                )
-                available = StockBalance.objects.filter(material=line.material, uom=line.uom).aggregate(
-                    total=Sum(F("quantity") - F("reserved_quantity")),
-                )["total"] or Decimal("0")
-                supply_by_material[key] = [on_order, max(available, Decimal("0")), False]
-            on_order, available, safety_applied = supply_by_material[key]
-            safety_stock = Decimal("0") if safety_applied else line.material.safety_stock_qty
-            requested = max(demand + safety_stock - on_order - available, Decimal("0"))
-            remaining_supply = max(on_order + available - demand - safety_stock, Decimal("0"))
-            remaining_on_order = min(on_order, remaining_supply)
-            supply_by_material[key] = [remaining_on_order, remaining_supply - remaining_on_order, True]
-            if requested <= 0:
-                continue
-            requisition_line = PurchaseRequisitionLine(
-                requisition=requisition,
-                line_number=line.line_number,
-                material=line.material,
-                uom=line.uom,
-                mrp_demand_qty=demand.normalize(),
-                on_order_qty=on_order,
-                available_qty=available,
-                safety_stock_qty=safety_stock,
-                source_sales_order_line=line,
-            )
-            requisition_line.full_clean()
-            requisition_line.save()
-            created += 1
-        if not created:
-            requisition.delete()
-            raise serializers.ValidationError("按 MRP 原则计算后没有大于 0 的请购明细")
-        AuditEvent.objects.create(
-            model=requisition._meta.label_lower,
-            object_id=str(requisition.pk),
-            action="mrp_generate",
-            actor=request.user.get_username() or "system",
-            payload={"source_sales_order_id": order.pk},
-        )
-        return response.Response(PurchaseRequisitionSerializer(requisition).data, status=201)
+        raise serializers.ValidationError("旧版单订单简式MRP入口已停用，请使用采购管理-贸易端MRP进行预览、复核和生成")
 
 
 SalesOrderLineViewSet = make_viewset(SalesOrderLine, SalesOrderLineSerializer)
 
 
-class SalesQuoteViewSet(ApprovalViewSet):
+class SalesQuoteViewSet(PagedSalesMixin, ApprovalViewSet):
+    search_fields = ("number", "customer__code", "customer__name", "lines__material__code", "lines__customer_material_code")
     queryset = SalesQuote.objects.select_related("customer", "currency").prefetch_related(
         "lines__material",
         "lines__uom",
@@ -257,19 +185,20 @@ class SalesQuoteViewSet(ApprovalViewSet):
             "quote__customer_id": customer_id,
             "material_id": material_id,
             "customer_material_code": customer_material.customer_code if customer_material else "",
-            "quote__is_ratified": True,
             "quote__effective_date__lte": target_date,
         }
+        material_filter_queryset = SalesQuoteLine.objects.select_related("quote__currency").filter(**material_filter)
+        material_filter_queryset = material_filter_queryset.filter(
+            (Q(quote__is_ratified=True, quote__status=ApprovalStatus.APPROVED)
+             & ~Q(quote__source_object="dgyzx1.sc_mstr"))
+            | Q(quote__source_object="dgyzx1.sc_mstr", quote__source_snapshot__sc_pst=True,
+                quote__is_confirmed=True, quote__status__in=(ApprovalStatus.PENDING, ApprovalStatus.APPROVED))
+        )
         if currency_id:
-            material_filter["quote__currency_id"] = currency_id
+            material_filter_queryset = material_filter_queryset.filter(quote__currency_id=currency_id)
         line = (
-            SalesQuoteLine.objects.select_related("quote__currency")
-            .filter(
-                **material_filter,
-            )
-            .filter(Q(quote__expiry_date__isnull=True) | Q(quote__expiry_date__gte=target_date))
-            .order_by("-quote__effective_date", "-quote__created_at", "-quote__number")
-            .first()
+            material_filter_queryset.filter(Q(quote__expiry_date__isnull=True) | Q(quote__expiry_date__gte=target_date))
+            .order_by("-quote__effective_date", "-quote__created_at", "-quote__number").first()
         )
         if not line:
             return response.Response({})
@@ -354,8 +283,8 @@ class SalesQuoteViewSet(ApprovalViewSet):
     @transaction.atomic
     def convert(self, request, pk=None):
         quote = self.get_object()
-        if quote.status != ApprovalStatus.APPROVED or not quote.is_ratified:
-            raise serializers.ValidationError("只有已审核并核准的销售报价可以转销售订单")
+        if not quote.is_price_eligible:
+            raise serializers.ValidationError("来源销售报价尚未发布或核准，不能转销售订单")
         required = ("customer_po", "delivery_address", "promised_date")
         missing = [name for name in required if not request.data.get(name)]
         if missing:
@@ -376,9 +305,11 @@ class SalesQuoteViewSet(ApprovalViewSet):
             source_quote=quote,
             created_by=request.user.get_username(),
         )
+        from backend.currencies import exchange_rate
+        order.exchange_rate = exchange_rate(order.currency, order.order_date)
         clean_sales_order(order)
         order.save()
-        for line in quote.lines.all():
+        for index, line in enumerate(quote.lines.all(), 1):
             requested_lines = request.data.get("lines", {})
             if not isinstance(requested_lines, dict):
                 raise serializers.ValidationError({"lines": "按报价行ID提供本次正式数量和备品计划"})
@@ -388,7 +319,7 @@ class SalesQuoteViewSet(ApprovalViewSet):
             quantity_field = serializers.DecimalField(max_digits=19, decimal_places=8, min_value=Decimal("0"))
             order_line = SalesOrderLine(
                 order=order,
-                line_number=line.line_number,
+                line_number=index * 10,
                 material=line.material,
                 customer_material=line.customer_material,
                 uom=line.uom,

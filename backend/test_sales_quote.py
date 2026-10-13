@@ -45,6 +45,13 @@ class SalesQuoteApiTests(SourceDatabaseIsolatedMixin, APITestCase):
         self.address = CustomerAddress.objects.create(customer=self.customer, code="0001", address="客户一收货仓")
         self.other_address = CustomerAddress.objects.create(customer=self.other_customer, code="0001", address="其他客户仓")
 
+    def test_customer_material_list_joins_material_in_one_query(self):
+        with self.assertNumQueries(1):
+            response = self.client.get("/api/customer-material/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 2)
+        self.assertTrue(all(row["material_code"] == self.material.code for row in response.data))
+
     def payload(self, effective_date="2026-01-01", customer_material=None):
         return {
             "customer": self.customer.id,
@@ -74,7 +81,7 @@ class SalesQuoteApiTests(SourceDatabaseIsolatedMixin, APITestCase):
 
     def test_nested_quote_autofills_customer_material_and_calculations(self):
         quote = self.create_quote()
-        self.assertTrue(quote["number"].startswith(f"MYSQ{timezone.localdate():%y%m}"))
+        self.assertTrue(quote["number"].startswith('MYSQ2601'))
         self.assertEqual(quote["currency"], self.currency.id)
         self.assertEqual(quote["tax_rate"], "13.00000000")
         self.assertEqual(quote["discount_rate"], "90.00000000")
@@ -259,7 +266,7 @@ class SalesQuoteApiTests(SourceDatabaseIsolatedMixin, APITestCase):
         }, format="json")
         self.assertEqual(converted.status_code, 201, converted.data)
         order = SalesOrder.objects.get(pk=converted.data["id"])
-        currency = Currency.objects.create(code="USD-HEADER", name="美元")
+        currency = Currency.objects.create(code="USD-HDR", name="美元")
         for changes in ({"customer": self.other_customer.pk}, {"currency": currency.pk},
                         {"order_date": str(effective - timedelta(days=1))}):
             with self.subTest(changes=changes):

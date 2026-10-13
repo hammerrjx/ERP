@@ -60,7 +60,8 @@ class Command(BaseCommand):
                 except Exception: skipped['CustomerMaterial'] = skipped.get('CustomerMaterial', 0) + 1
             # Master rows are removed only when no surviving business object protects them.
             code_sets={
-                Currency:{text(r.get('货币')) for r in data['currency']}, Location:{text(r.get('库位')) for r in data['location']},
+                # Currency is shared reference data, not owned by any workbook.
+                Location:{text(r.get('库位')) for r in data['location']},
                 ProductCategory:{text(r.get('产品类')) for r in data['category']}, Uom:{text(r.get('单位')) for r in data['uom']},
                 Material:{text(r.get('物料编码')) for r in data['material']}, Partner:{text(r.get('客户代码')) for r in data['customer']} | {text(r.get('供应商代码')) for r in data['supplier']},
             }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import {
   Bell,
   Boxes,
@@ -33,12 +33,26 @@ import { configs } from './configs'
 import { useResourceData } from './useResourceData'
 import { ResourceModal } from './ResourceModal'
 import { PendingButton } from '../components/PendingControls'
+import { WarehouseWorkspace } from '../modules/inventory/WarehouseWorkspace'
+import { InventoryLedger } from '../modules/inventory/InventoryLedger'
+import { InventoryAnalysis } from '../modules/inventory/InventoryAnalysis'
+import { SupplierWorkspace } from '../modules/purchase/SupplierWorkspace'
+import { ConversionWorkspace } from '../modules/purchase/ConversionWorkspace'
+import { PurchaseOrderWorkspace } from '../modules/purchase/PurchaseOrderWorkspace'
+import { RequisitionWorkspace } from '../modules/purchase/RequisitionWorkspace'
+import { ReceivingWorkspace } from '../modules/purchase/ReceivingWorkspace'
+import { MaterialWorkspace } from '../modules/master-data/MaterialWorkspace'
+import { NoOrderReturnWorkspace } from '../modules/sales/NoOrderReturnWorkspace'
+import { TradeMrpWorkspace } from '../modules/purchase/TradeMrpWorkspace'
 
 export default function App() {
   const [session, setSession] = useState(readSession)
   const [active, setActive] = useState('overview')
+  const [purchaseOrderId, setPurchaseOrderId] = useState(null)
+  const [requisitionId, setRequisitionId] = useState(null)
   const [open, setOpen] = useState({})
   const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
   const [modal, setModal] = useState(false)
   const [editor, setEditor] = useState(null)
   const [detail, setDetail] = useState(null)
@@ -66,8 +80,9 @@ export default function App() {
     invalidateDeliveryLookups,
     invalidateLookup,
     resetPage,
-    resetData
-  } = useResourceData(session, active)
+    resetData,
+    pagination, loadPage, loadEditorLookups
+  } = useResourceData(session, active, deferredQuery)
 
   const allowedModules = useMemo(
     () =>
@@ -85,6 +100,7 @@ export default function App() {
   )
 
   const select = (id) => {
+    if (id === active) { setMobileNav(false); return }
     setActive(id)
     setQuery('')
     setNotice('')
@@ -139,6 +155,7 @@ export default function App() {
       is_ratified: false,
       lines: sourceLine ? [{ ...sourceLine, id: undefined }] : []
     })
+    loadEditorLookups('salesQuotes').catch(error => setError(error.message))
     setModal(true)
   }
   const removeRecord = async (row) => {
@@ -225,6 +242,7 @@ export default function App() {
     }
   }
   const transition = async (row, action) => {
+    if (current.resource === 'delivery-order' && action === 'void' && !window.confirm(`作废送货单 ${row.number} 并释放订单数量占用？单号和记录将保留。`)) return
     try {
       await resourceApi(current.resource, session.token).action(row.id, action)
       invalidateLookup(current.resource)
@@ -238,9 +256,10 @@ export default function App() {
         {
           submit: '已提交审核',
           confirm: '报价已确认',
-          unconfirm: '报价已反确认',
-          approve: '报价已审核',
-          unapprove: '报价已反审核',
+          unconfirm: current.resource === 'delivery-order' ? '送货单已取消回单确认' : '报价已反确认',
+          approve: current.resource === 'delivery-order' ? '送货单已审核' : '报价已审核',
+          unapprove: current.resource === 'delivery-order' ? '送货单已反审核，请编辑原单修正库位' : '报价已反审核',
+          void: '单据已作废，数量占用已释放',
           ratify: '报价已核准',
           unratify: '报价已反核准',
           'sales-confirm': '报价已销售确认',
@@ -254,7 +273,7 @@ export default function App() {
   const exportRecords = async (filtered) => {
     try {
       const body = {
-        ...(filtered ? { ids: filteredRows.map((row) => row.id) } : {}),
+        ...(filtered ? (pagination ? { filters: { q: deferredQuery.trim() } } : { ids: filteredRows.map((row) => row.id) }) : {}),
         ...(current.partnerKind ? { partner_kind: current.partnerKind } : {})
       }
       const file = await download(`/${current.resource}/export/`, { token: session.token, body })
@@ -270,11 +289,12 @@ export default function App() {
     }
   }
   const filteredRows = useMemo(() => {
-    const needle = query.trim().toLowerCase()
+    if (pagination) return rows
+    const needle = deferredQuery.trim().toLowerCase()
     return needle
       ? rows.filter((row) => Object.values(row).some((value) => displayValue(value).toLowerCase().includes(needle)))
       : rows
-  }, [query, rows])
+  }, [deferredQuery, rows, pagination])
 
   if (!session)
     return (
@@ -291,13 +311,15 @@ export default function App() {
   const canCreate =
     current &&
     (current.fields.length || current.resource === 'supplier-quote') &&
-    active !== 'payableVouchers' &&
+      active !== 'payableVouchers' &&
+      !(['currency', 'currency-rate'].includes(current.resource) && [...rows, ...(lookups.currencies || [])].some(row => row.source_object?.startsWith('dgyzx1.'))) &&
     can(session, current.permission, 'create')
   const canGeneratePayables = active === 'payableVouchers' && can(session, current.permission, 'create')
   const openEditor = () => {
     setError('')
     setNotice('')
     setModal(true)
+    if (pagination) loadEditorLookups(active).catch(error => setError(error.message))
     if (current?.resource === 'delivery-order') loadDeliveryLookups()
     if (current?.resource === 'sales-order') loadSalesOrderLookups()
   }
@@ -320,22 +342,16 @@ export default function App() {
       setError(requestError.message)
     }
   }
-  const openSalesOrderRecord = async (row) => {
+  const loadSalesOrderRecord = async (row, showRecord) => {
     try {
       await loadSalesOrderLookups()
-      setEditor(await resourceApi('sales-order', session.token).retrieve(row.id))
+      showRecord(await resourceApi('sales-order', session.token).retrieve(row.id))
     } catch (requestError) {
       setError(requestError.message)
     }
   }
-  const viewSalesOrderRecord = async (row) => {
-    try {
-      await loadSalesOrderLookups()
-      setDetail(await resourceApi('sales-order', session.token).retrieve(row.id))
-    } catch (requestError) {
-      setError(requestError.message)
-    }
-  }
+  const openSalesOrderRecord = (row) => loadSalesOrderRecord(row, setEditor)
+  const viewSalesOrderRecord = (row) => loadSalesOrderRecord(row, setDetail)
 
   return (
     <div className="app-shell">
@@ -453,6 +469,28 @@ export default function App() {
             error={dashboardError}
             onRetry={loadDashboard}
           />
+        ) : current?.inventoryAnalysis ? (
+          <InventoryAnalysis key={active} monthly={current.inventoryAnalysis === 'monthly'} title={current.title} session={session} />
+        ) : current?.inventoryLedger || ['balances', 'transactions'].includes(active) ? (
+          <InventoryLedger key={active} resource={current.resource} title={current.title} session={session} onClose={() => setActive('overview')} />
+        ) : current?.warehouseKind ? (
+          <WarehouseWorkspace key={active} kind={current.warehouseKind} initialCount={current.initialCount} title={current.title} session={session} />
+        ) : active === 'tradeMrp' ? (
+          <TradeMrpWorkspace session={session} onClose={() => select('overview')} onOpenRequisition={id => { setRequisitionId(id); select('requisitions') }} />
+        ) : active === 'noOrderReturns' ? (
+          <NoOrderReturnWorkspace session={session} />
+        ) : active === 'requisitionConvert' ? (
+          <ConversionWorkspace session={session} onClose={() => select('overview')} onOpenOrder={id => { setPurchaseOrderId(id); select('purchaseOrders') }} />
+        ) : active === 'purchaseOrders' ? (
+          <PurchaseOrderWorkspace session={session} initialId={purchaseOrderId} onClose={() => { setPurchaseOrderId(null); select('overview') }} />
+        ) : active === 'receipts' || active === 'purchaseReturns' ? (
+          <ReceivingWorkspace key={active} session={session} returning={active === 'purchaseReturns'} onOpenOrder={id => { setPurchaseOrderId(id); select('purchaseOrders') }} onClose={() => select('overview')} />
+        ) : active === 'requisitions' ? (
+          <RequisitionWorkspace session={session} initialId={requisitionId} />
+        ) : active === 'suppliers' || active === 'supplierQuotes' ? (
+          <SupplierWorkspace key={active} mode={active === 'supplierQuotes' ? 'quote' : 'supplier'} session={session} />
+        ) : active === 'materials' ? (
+          <MaterialWorkspace key="materials" session={session} />
         ) : active === 'materialImport' ? (
           <>
             <div className="page-head">
@@ -546,28 +584,31 @@ export default function App() {
                 </div>
               </div>
               <ResourceTable
+                key={`${active}-${deferredQuery}`}
                 rows={filteredRows}
-                total={rows.length}
+                total={pagination?.count ?? rows.length}
+                pagination={pagination}
+                onPageChange={pagination ? page => loadPage(active, page) : undefined}
                 config={current}
                 session={session}
                 lookups={lookups}
                 onTransition={transition}
                 onConvert={setConversionRow}
-                onWorkflow={(row, kind) => setWorkflow({ row, kind })}
+                onWorkflow={(row, kind) => kind === 'mrp' ? select('tradeMrp') : setWorkflow({ row, kind })}
                 onEvidence={setEvidenceRow}
                 onView={(row) =>
                   current.resource === 'sales-order'
                     ? viewSalesOrderRecord(row)
                     : current.resource === 'delivery-order'
                       ? viewDeliveryRecord(row)
-                      : setDetail(row)
+                      : (loadEditorLookups(active).catch(error => setError(error.message)), setDetail(row))
                 }
                 onEdit={(row) =>
                   current.resource === 'sales-order'
                     ? openSalesOrderRecord(row)
                     : current.resource === 'delivery-order'
                       ? openDeliveryRecord(row)
-                      : setEditor(row)
+                      : (loadEditorLookups(active).catch(error => setError(error.message)), setEditor(row))
                 }
                 onNewVersion={newSalesQuoteVersion}
                 onDelete={removeRecord}

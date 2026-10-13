@@ -11,6 +11,7 @@ from django.utils import timezone
 from .base import ApprovalStatus, AuditedModel
 from .inventory import StockBalance
 from .master_data import Partner
+from backend.inventory_codes import PURCHASE_RECEIPT, PURCHASE_RETURN
 
 
 class SupplierQuoteSequence(models.Model):
@@ -19,8 +20,8 @@ class SupplierQuoteSequence(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     @classmethod
-    def next_number(cls):
-        period = timezone.localdate().strftime("%Y%m")
+    def next_number(cls, day=None):
+        period = models.DateField().to_python(day or timezone.localdate()).strftime("%Y%m")
         with transaction.atomic():
             sequence, _ = cls.objects.select_for_update().get_or_create(period=period)
             existing = SupplierQuote.objects.filter(number__startswith=f"MYPQ{period[2:]}").values_list(
@@ -30,6 +31,8 @@ class SupplierQuoteSequence(models.Model):
                 [sequence.last_value, *(int(number[-4:]) for number in existing if str(number)[-4:].isdigit())]
             )
             sequence.last_value += 1
+            if sequence.last_value > 9999:
+                raise ValidationError('本月四位报价流水已用尽')
             sequence.save(update_fields=("last_value", "updated_at"))
         return f"MYPQ{period[2:]}{sequence.last_value:04d}"
 
@@ -142,7 +145,7 @@ class SupplierQuote(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = SupplierQuoteSequence.next_number()
+            self.number = SupplierQuoteSequence.next_number(self.effective_date)
         self.unit_price = self.material_unit_price + self.processing_unit_price
         super().save(*args, **kwargs)
 
@@ -267,15 +270,41 @@ class SupplierQuoteLine(models.Model):
         return (self.unit_price / divisor).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
 
 
+class PurchaseRequisitionSequence(models.Model):
+    period = models.CharField(max_length=4, primary_key=True)
+    last_value = models.PositiveIntegerField(default=0)
+
+    @classmethod
+    @transaction.atomic
+    def next_number(cls, day):
+        period = day.strftime('%y%m')
+        seq, _ = cls.objects.select_for_update().get_or_create(period=period)
+        prefix = 'MYPR' + period
+        values = PurchaseRequisition.objects.filter(number__startswith=prefix).values_list('number', flat=True)
+        seq.last_value = max([seq.last_value, *(int(n[8:]) for n in values if len(n) == 12 and n[8:].isdigit())]) + 1
+        if seq.last_value > 9999:
+            raise ValidationError('当月请购编号已用尽')
+        seq.save()
+        return prefix + f'{seq.last_value:04d}'
+
+
 class PurchaseRequisition(AuditedModel):
     class AggregationMode(models.TextChoices):
         NONE = "none", "不汇总"
         MATERIAL = "material", "按物料汇总"
 
     number = models.CharField(max_length=40, unique=True, blank=True)
-    department = models.ForeignKey("Department", on_delete=models.PROTECT, related_name="purchase_requisitions")
+    department = models.ForeignKey("Department", on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_requisitions")
+    site = models.CharField(max_length=20, default='1000')
+    requisition_type = models.CharField(max_length=1, default='P')
+    document_type = models.CharField(max_length=1, blank=True)
+    requester = models.CharField(max_length=64, blank=True)
+    version = models.PositiveIntegerField(default=0)
+    print_count = models.PositiveIntegerField(default=0)
+    source_profile = models.CharField(max_length=40, blank=True)
+    source_snapshot = models.JSONField(default=dict, blank=True)
     request_date = models.DateField(default=timezone.localdate)
-    needed_date = models.DateField()
+    needed_date = models.DateField(null=True, blank=True)
     aggregation_mode = models.CharField(max_length=16, choices=AggregationMode.choices, default=AggregationMode.NONE)
     quantity_rule = models.CharField(max_length=16, default="mrp")
     only_positive = models.BooleanField(default=True)
@@ -290,37 +319,67 @@ class PurchaseRequisition(AuditedModel):
         ordering = ("-request_date", "-number")
 
     def clean(self):
-        if self.needed_date and self.request_date and self.needed_date < self.request_date:
-            raise ValidationError({"needed_date": "需求日期不能早于请购日期"})
+        if self.requisition_type != 'P':
+            raise ValidationError('本期仅开放P采购请购，其他类型保留只读')
+        if not self.source_profile and self.document_type != '':
+            raise ValidationError('本期手工请购只开放普通单别')
+
+    def approve(self, actor):
+        self.clean()
+        if not self.lines.exists():
+            raise ValidationError('请购单至少需要一行')
+        for line in self.lines.all():
+            line.clean()
+        super().approve(actor)
+
+    def unapprove(self):
+        self.clean()
+        if self.lines.filter(converted_qty__gt=0).exists() or self.lines.filter(purchase_order_lines__isnull=False).exists():
+            raise ValidationError('已关联采购，不能反审核')
+        super().unapprove()
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"PR-{timezone.now():%Y%m%d%H%M%S%f}"
+            self.number = PurchaseRequisitionSequence.next_number(self.request_date)
         super().save(*args, **kwargs)
 
 
 class PurchaseRequisitionLine(models.Model):
     requisition = models.ForeignKey(PurchaseRequisition, on_delete=models.CASCADE, related_name="lines")
     line_number = models.PositiveIntegerField()
-    material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="purchase_requisition_lines")
-    uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="purchase_requisition_lines")
-    mrp_demand_qty = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0"))])
+    material = models.ForeignKey("Material", on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_requisition_lines")
+    uom = models.ForeignKey("Uom", on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_requisition_lines")
+    needed_date = models.DateField(null=True, blank=True)
+    line_status = models.CharField(max_length=8, blank=True)
+    source_kind = models.CharField(max_length=16, default='manual')
+    created_by = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+    modification_count = models.PositiveIntegerField(default=0)
+    source_snapshot = models.JSONField(default=dict, blank=True)
+    material_snapshot = models.JSONField(default=dict, blank=True)
+    notes = models.TextField(blank=True)
+    closed_by = models.CharField(max_length=64, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    close_reason = models.TextField(blank=True)
+    mrp_demand_qty = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
     on_order_qty = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     available_qty = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     safety_stock_qty = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
-    requested_qty = models.DecimalField(max_digits=18, decimal_places=6, default=Decimal("0"), editable=False)
+    requested_qty = models.DecimalField(max_digits=19, decimal_places=8, default=Decimal("0"))
     calculation_snapshot = models.JSONField(default=dict, editable=False)
     source_sales_order_line = models.ForeignKey(
         "SalesOrderLine", on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_requisition_lines"
     )
     converted_qty = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     source_object = models.CharField(max_length=40, default="req_mstr")
     source_detail_object = models.CharField(max_length=40, default="reqd_det")
@@ -335,19 +394,21 @@ class PurchaseRequisitionLine(models.Model):
         return max(self.mrp_demand_qty + self.safety_stock_qty - self.on_order_qty - self.available_qty, Decimal("0"))
 
     def clean(self):
-        quantity = self.calculated_quantity()
-        if (
-            self.requisition_id
-            and self.requisition.aggregation_mode == PurchaseRequisition.AggregationMode.NONE
-            and not self.source_sales_order_line_id
-        ):
-            raise ValidationError({"source_sales_order_line": "不汇总请购必须保留销售订单明细来源"})
+        quantity = self.requested_qty if self.pk or self.source_kind != 'legacy_mrp' else self.calculated_quantity()
+        if not self.material_id and not self.material_snapshot.get('pt_part'):
+            raise ValidationError('请选择物料')
+        if self.material_id and self.uom_id != self.material.uom_id:
+            raise ValidationError('请购数量必须使用物料库存单位')
+        if self.converted_qty > quantity:
+            raise ValidationError('请购数量不能小于已采购数量')
         if self.requisition_id and self.requisition.only_positive and quantity <= 0:
             raise ValidationError({"requested_qty": "只显示请购量大于 0 时不能保存零请购量明细"})
 
     def save(self, *args, **kwargs):
-        self.requested_qty = self.calculated_quantity()
-        self.calculation_snapshot = {
+        if not self.pk and self.source_kind == 'legacy_mrp':
+            self.requested_qty = self.calculated_quantity()
+        if not self.calculation_snapshot:
+            self.calculation_snapshot = {
             "rule": self.requisition.quantity_rule,
             "mrp_demand_qty": str(self.mrp_demand_qty),
             "on_order_qty": str(self.on_order_qty),
@@ -355,7 +416,27 @@ class PurchaseRequisitionLine(models.Model):
             "safety_stock_qty": str(self.safety_stock_qty),
             "requested_qty": str(self.requested_qty),
         }
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            # New trade rows retain one source each. Historical imported snapshots
+            # are never rewritten; only the live allocation follows a quantity edit.
+            if self.source_kind == 'trade_mrp' and self.calculation_snapshot.get('rule_version') == 'trade-net-v3':
+                if not kwargs.get('update_fields') or 'requested_qty' in kwargs['update_fields']:
+                    self.sources.update(quantity=self.requested_qty)
+
+
+class PurchaseRequisitionSource(models.Model):
+    line = models.ForeignKey(PurchaseRequisitionLine, on_delete=models.CASCADE, related_name='sources')
+    sequence = models.PositiveIntegerField()
+    source_number = models.CharField(max_length=80, blank=True)
+    source_marker = models.CharField(max_length=80, blank=True)
+    source_sequence = models.IntegerField(default=0)
+    quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    snapshot = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ('line', 'sequence')
+        constraints = [models.UniqueConstraint(fields=('line', 'sequence'), name='uniq_requisition_source_line')]
 
 
 class RequestForQuotation(AuditedModel):
@@ -429,7 +510,7 @@ class PurchaseOrder(AuditedModel):
     number = models.CharField(max_length=40, unique=True, blank=True)
     supplier = models.ForeignKey("Partner", on_delete=models.PROTECT, related_name="purchase_orders")
     currency = models.ForeignKey("Currency", on_delete=models.PROTECT, related_name="purchase_orders")
-    department = models.ForeignKey("Department", on_delete=models.PROTECT, related_name="purchase_orders")
+    department = models.ForeignKey("Department", on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_orders")
     order_date = models.DateField(default=timezone.localdate)
     buyer = models.CharField(max_length=64, blank=True)
     payment_method = models.CharField(max_length=80)
@@ -446,6 +527,17 @@ class PurchaseOrder(AuditedModel):
     source_purchase_return = models.ForeignKey(
         "PurchaseReturn", on_delete=models.PROTECT, null=True, blank=True, related_name="replacement_orders"
     )
+    site = models.CharField(max_length=16, default="1000")
+    document_type = models.CharField(max_length=16, default="standard")
+    exchange_rate = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    shipping_address = models.CharField(max_length=240, blank=True)
+    billing_address = models.CharField(max_length=240, blank=True)
+    revision_label = models.CharField(max_length=40, blank=True)
+    terms = models.TextField(blank=True)
+    version = models.PositiveIntegerField(default=1)
+    delivery_approved_by = models.CharField(max_length=64, blank=True)
+    delivery_approved_at = models.DateTimeField(null=True, blank=True)
+    high_price_permission = models.CharField(max_length=80, blank=True)
     source_object = models.CharField(max_length=40, default="po_mstr")
 
     class Meta:
@@ -468,7 +560,9 @@ class PurchaseOrder(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"PO-{timezone.now():%Y%m%d%H%M%S%f}"
+            from .document_numbers import next_document_number
+            prefix = {'production': 'MYPO', 'non_production': 'MYPUO', 'outsource': 'MYPS'}[self.purchase_type]
+            self.number = next_document_number(prefix, self.order_date, 'PurchaseOrder')
         super().save(*args, **kwargs)
 
 
@@ -477,14 +571,14 @@ class PurchaseOrderLine(models.Model):
     line_number = models.PositiveIntegerField()
     material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="purchase_order_lines")
     uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="purchase_order_lines")
-    quantity = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0.000001"))])
-    unit_price = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0"))])
+    quantity = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
+    unit_price = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
     promised_date = models.DateField()
     received_quantity = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     returned_quantity = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     source_requisition_line = models.ForeignKey(
         PurchaseRequisitionLine, on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_order_lines"
@@ -495,28 +589,85 @@ class PurchaseOrderLine(models.Model):
     source_supplier_quote_line = models.ForeignKey(
         SupplierQuoteLine, on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_order_lines"
     )
+    allocation_managed = models.BooleanField(default=False)
+    snapshot = models.JSONField(default=dict, blank=True)
+    needed_date = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    uom_rate_m = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    uom_rate_d = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    notes = models.CharField(max_length=240, blank=True)
+    line_status = models.CharField(max_length=1, blank=True)
+    closed_by = models.CharField(max_length=64, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+    modification_count = models.PositiveIntegerField(default=0)
+    spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    over_receipt_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    extra_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    copper_price = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    accepted_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    accepted_inventory_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    received_spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    accepted_spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    accepted_spare_inventory_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    returned_spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    minimum_price = models.DecimalField(max_digits=19, decimal_places=8, default=0)
     source_object = models.CharField(max_length=40, default="pod_det")
 
     class Meta:
         ordering = ("order", "line_number")
         constraints = [models.UniqueConstraint(fields=("order", "line_number"), name="uniq_purchase_order_line")]
 
+    def clean(self):
+        if self.uom_rate_m <= 0 or self.uom_rate_d <= 0:
+            raise ValidationError('采购单位换算分子和分母必须大于0')
+
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        if self.allocation_managed:
+            return super().save(*args, **kwargs)
+        from backend.requisitions import purchase_quantity, update_applied
+        old = type(self).objects.select_for_update().filter(pk=self.pk).first() if self.pk else None
+        ids = sorted({item.source_requisition_line_id for item in (old, self) if item and item.source_requisition_line_id})
+        list(PurchaseRequisitionLine.objects.select_for_update().filter(pk__in=ids).order_by('pk'))
+        deltas = {}
+        for item, sign in ((old, -1), (self, 1)):
+            if item and item.source_requisition_line_id:
+                key = item.source_requisition_line_id
+                deltas[key] = deltas.get(key, Decimal(0)) + sign * purchase_quantity(item)
+        for key, delta in deltas.items():
+            if delta:
+                update_applied(key, delta)
+        super().save(*args, **kwargs)
+
 
 class GoodsReceipt(AuditedModel):
+    site = models.CharField(max_length=16, default="1000")
+    version = models.PositiveIntegerField(default=1)
+    posting_version = models.PositiveIntegerField(default=0)
+    imported = models.BooleanField(default=False)
+    default_print_person = models.CharField(max_length=80, blank=True)
+    print_count = models.PositiveIntegerField(default=0)
+    iqc_location = models.ForeignKey("Location", null=True, blank=True, on_delete=models.PROTECT, related_name="iqc_receipts")
+    raw_location = models.ForeignKey("Location", null=True, blank=True, on_delete=models.PROTECT, related_name="raw_receipts")
     class ReceiptType(models.TextChoices):
         NORMAL = "normal", "采购收货"
         NON_PRODUCTION = "non_production", "非生产收货"
 
     number = models.CharField(max_length=40, unique=True, blank=True)
     supplier = models.ForeignKey("Partner", on_delete=models.PROTECT, related_name="goods_receipts")
-    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="goods_receipts")
+    # A receipt can contain lines from several purchase orders; the line is the source of truth.
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, null=True, blank=True, related_name="goods_receipts")
     receipt_date = models.DateField(default=timezone.localdate)
     supplier_delivery_number = models.CharField(max_length=80, blank=True)
     receipt_type = models.CharField(max_length=20, choices=ReceiptType.choices, default=ReceiptType.NORMAL)
     notes = models.CharField(max_length=240, blank=True)
     posted = models.BooleanField(default=False, editable=False)
-    # Legacy receiving header is exposed by coerp_dgyzx1.dbo.v_prh_receiver.
-    source_object = models.CharField(max_length=40, default="prh_receiver")
+    # Source document header: dgyzx1.grn_mstr.
+    source_object = models.CharField(max_length=40, default="grn_mstr")
 
     class Meta:
         ordering = ("-receipt_date", "-number")
@@ -538,78 +689,64 @@ class GoodsReceipt(AuditedModel):
             raise ValidationError({"receipt_type": "生产采购不能使用非生产收货"})
 
     def approve(self, actor):
-        if self.purchase_order.status != ApprovalStatus.APPROVED:
-            raise ValidationError("采购单审核通过后才能收货")
-        lines = list(self.lines.select_related("purchase_order_line", "material", "uom", "location"))
-        if not lines:
-            raise ValidationError("收货单至少需要一条明细")
-        for line in lines:
-            line.full_clean()
-        super().approve(actor)
-        if self.posted:
-            return
-        for line in lines:
-            order_line = line.purchase_order_line
-            order_line.received_quantity += line.quantity
-            order_line.save(update_fields=["received_quantity"])
-            if self.receipt_type == self.ReceiptType.NORMAL and not line.material.no_stock_movement:
-                StockBalance.adjust(
-                    material=line.material,
-                    location=line.location,
-                    uom=line.uom,
-                    quantity=line.quantity,
-                    movement_type="purchase_receipt",
-                    source_model=self._meta.label_lower,
-                    source_id=self.pk,
-                    source_line_id=line.pk,
-                    actor=actor,
-                    batch_number=line.batch_number,
-                )
-        self.posted = True
+        from backend.receiving import approve_document
+        approve_document(self, actor)
+
+    def unapprove(self, actor=''):
+        from backend.receiving import unapprove_document
+        unapprove_document(self, actor)
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"GR-{timezone.now():%Y%m%d%H%M%S%f}"
+            from .document_numbers import next_document_number
+            prefix = 'MYPUG' if self.receipt_type == self.ReceiptType.NON_PRODUCTION else 'MYPG'
+            self.number = next_document_number(prefix, self.receipt_date, 'GoodsReceipt')
         super().save(*args, **kwargs)
 
 
 class GoodsReceiptLine(models.Model):
+    spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    pending_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    notes = models.CharField(max_length=240, blank=True)
+    uom_rate_m = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    uom_rate_d = models.DecimalField(max_digits=19, decimal_places=8, default=1)
     receipt = models.ForeignKey(GoodsReceipt, on_delete=models.CASCADE, related_name="lines")
     line_number = models.PositiveIntegerField()
     purchase_order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT, related_name="receipt_lines")
     material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="goods_receipt_lines")
     uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="goods_receipt_lines")
-    quantity = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0.000001"))])
+    quantity = models.DecimalField(max_digits=19, decimal_places=8)
     accepted_quantity = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     rejected_quantity = models.DecimalField(
-        max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+        max_digits=19, decimal_places=8, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     location = models.ForeignKey("Location", on_delete=models.PROTECT, related_name="goods_receipt_lines")
     batch_number = models.CharField(max_length=80, blank=True)
-    # Legacy receiving detail is exposed by coerp_dgyzx1.dbo.v_prh_hist.
-    source_object = models.CharField(max_length=40, default="prh_hist")
+    # Source document detail: dgyzx1.grnd_det.
+    source_object = models.CharField(max_length=40, default="grnd_det")
 
     class Meta:
         ordering = ("receipt", "line_number")
         constraints = [models.UniqueConstraint(fields=("receipt", "line_number"), name="uniq_goods_receipt_line")]
 
     def clean(self):
-        order_line = self.purchase_order_line
-        if self.receipt_id and order_line.order_id != self.receipt.purchase_order_id:
-            raise ValidationError({"purchase_order_line": "收货行必须来自收货单关联采购单"})
-        if self.material_id != order_line.material_id or self.uom_id != order_line.uom_id:
-            raise ValidationError("收货物料和单位必须与采购行一致")
-        tolerance = order_line.quantity * (Decimal("1") + self.receipt.supplier.over_receipt_ratio / Decimal("100"))
-        if order_line.received_quantity + self.quantity > tolerance:
-            raise ValidationError({"quantity": "收货数量超过采购数量及允许超收比例"})
+        from backend.receiving import validate_line
+        validate_line(self)
 
 
 class PurchaseReturn(AuditedModel):
+    site = models.CharField(max_length=16, default="1000")
+    version = models.PositiveIntegerField(default=1)
+    posting_version = models.PositiveIntegerField(default=0)
+    imported = models.BooleanField(default=False)
+    default_print_person = models.CharField(max_length=80, blank=True)
+    print_count = models.PositiveIntegerField(default=0)
+    return_location = models.ForeignKey("Location", null=True, blank=True, on_delete=models.PROTECT, related_name="purchase_return_headers")
     number = models.CharField(max_length=40, unique=True, blank=True)
     supplier = models.ForeignKey("Partner", on_delete=models.PROTECT, related_name="purchase_returns")
-    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="purchase_returns")
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, null=True, blank=True, related_name="purchase_returns")
     return_date = models.DateField(default=timezone.localdate)
     replenishment = models.BooleanField(default=True)
     reason = models.CharField(max_length=240)
@@ -623,75 +760,33 @@ class PurchaseReturn(AuditedModel):
             raise ValidationError({"supplier": "退货供应商必须与采购单一致"})
 
     def approve(self, actor):
-        if self.purchase_order.status != ApprovalStatus.APPROVED:
-            raise ValidationError("采购单审核通过后才能退货")
-        lines = list(self.lines.select_related("purchase_order_line", "material", "uom", "source_location"))
-        if not lines:
-            raise ValidationError("采购退货单至少需要一条明细")
-        for line in lines:
-            line.full_clean()
-        super().approve(actor)
-        if self.posted:
-            return
-        for line in lines:
-            StockBalance.adjust(
-                material=line.material,
-                location=line.source_location,
-                uom=line.uom,
-                quantity=-line.quantity,
-                movement_type="purchase_return",
-                source_model=self._meta.label_lower,
-                source_id=self.pk,
-                source_line_id=line.pk,
-                actor=actor,
-                batch_number=line.batch_number,
-            )
-            order_line = line.purchase_order_line
-            order_line.returned_quantity += line.quantity
-            order_line.save(update_fields=["returned_quantity"])
-        if self.replenishment and not self.replacement_orders.exists():
-            source = self.purchase_order
-            replacement = PurchaseOrder.objects.create(
-                supplier=source.supplier,
-                currency=source.currency,
-                department=source.department,
-                order_date=timezone.localdate(),
-                buyer=source.buyer,
-                payment_method=source.payment_method,
-                tax_rate=source.tax_rate,
-                promised_date=max(line.purchase_order_line.promised_date for line in lines),
-                purchase_type=source.purchase_type,
-                cost_center=source.cost_center,
-                notes=f"采购退货 {self.number} 自动补货",
-                source_purchase_return=self,
-                created_by=actor,
-            )
-            for index, line in enumerate(lines, 1):
-                PurchaseOrderLine.objects.create(
-                    order=replacement,
-                    line_number=index * 10,
-                    material=line.material,
-                    uom=line.uom,
-                    quantity=line.quantity,
-                    unit_price=line.purchase_order_line.unit_price,
-                    promised_date=line.purchase_order_line.promised_date,
-                    source_requisition_line=line.purchase_order_line.source_requisition_line,
-                )
-        self.posted = True
+        from backend.receiving import approve_document
+        approve_document(self, actor)
+
+    def unapprove(self, actor=''):
+        from backend.receiving import unapprove_document
+        unapprove_document(self, actor)
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = f"RTV-{timezone.now():%Y%m%d%H%M%S%f}"
+            from .document_numbers import next_document_number
+            self.number = next_document_number('MYPT', self.return_date, 'PurchaseReturn')
         super().save(*args, **kwargs)
 
 
 class PurchaseReturnLine(models.Model):
+    spare_quantity = models.DecimalField(max_digits=19, decimal_places=8, default=0)
+    uom_rate_m = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    uom_rate_d = models.DecimalField(max_digits=19, decimal_places=8, default=1)
+    iqc_number = models.CharField(max_length=40, blank=True)
+    iqc_line = models.PositiveIntegerField(default=0)
+    replacement_line = models.OneToOneField(PurchaseOrderLine, null=True, blank=True, on_delete=models.PROTECT, related_name="replacement_source")
     purchase_return = models.ForeignKey(PurchaseReturn, on_delete=models.CASCADE, related_name="lines")
     line_number = models.PositiveIntegerField()
     purchase_order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT, related_name="return_lines")
     material = models.ForeignKey("Material", on_delete=models.PROTECT, related_name="purchase_return_lines")
     uom = models.ForeignKey("Uom", on_delete=models.PROTECT, related_name="purchase_return_lines")
-    quantity = models.DecimalField(max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal("0.000001"))])
+    quantity = models.DecimalField(max_digits=19, decimal_places=8, validators=[MinValueValidator(Decimal("0"))])
     source_location = models.ForeignKey("Location", on_delete=models.PROTECT, related_name="purchase_return_lines")
     batch_number = models.CharField(max_length=80, blank=True)
     reason = models.CharField(max_length=240)
@@ -703,10 +798,73 @@ class PurchaseReturnLine(models.Model):
         ]
 
     def clean(self):
-        order_line = self.purchase_order_line
-        if self.purchase_return_id and order_line.order_id != self.purchase_return.purchase_order_id:
-            raise ValidationError({"purchase_order_line": "退货行必须来自退货单关联采购单"})
-        if self.material_id != order_line.material_id or self.uom_id != order_line.uom_id:
-            raise ValidationError("退货物料和单位必须与采购行一致")
-        if order_line.returned_quantity + self.quantity > order_line.quantity:
-            raise ValidationError({"quantity": "退货数量不能超过采购数量"})
+        from backend.receiving import validate_line
+        validate_line(self)
+
+
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
+
+
+@receiver(pre_delete, sender=PurchaseOrderLine)
+def release_requisition_on_purchase_delete(sender, instance, **kwargs):
+    if instance.source_requisition_line_id and not instance.allocation_managed:
+        from backend.requisitions import purchase_quantity, update_applied
+        update_applied(instance.source_requisition_line_id, -purchase_quantity(instance))
+
+
+class PurchaseOrderAllocation(models.Model):
+    """podr_det: purchase-unit and stock-unit quantities allocated to a requisition."""
+    line = models.ForeignKey(PurchaseOrderLine, on_delete=models.CASCADE, related_name="allocations")
+    sequence = models.PositiveIntegerField()
+    kind = models.CharField(max_length=1, choices=(("1", "请购单"), ("2", "额外采购")))
+    requisition_line = models.ForeignKey(PurchaseRequisitionLine, null=True, blank=True,
+        on_delete=models.PROTECT, related_name="purchase_allocations")
+    quantity = models.DecimalField(max_digits=19, decimal_places=8)
+    inventory_quantity = models.DecimalField(max_digits=19, decimal_places=8)
+    snapshot = models.JSONField(default=dict, blank=True)
+    notes = models.CharField(max_length=240, blank=True)
+    created_by = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+    modification_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("line", "sequence")
+        constraints = [models.UniqueConstraint(fields=("line", "sequence"), name="uniq_po_allocation_sequence")]
+
+    @transaction.atomic
+    def save(self, *args, **kwargs):
+        from backend.requisitions import update_applied
+        if self.quantity < 0 or self.inventory_quantity < 0:
+            raise ValidationError('来源分配数量不能为负数')
+        if (self.kind == '1') != bool(self.requisition_line_id):
+            raise ValidationError('请购分配必须关联请购行，额外采购不能关联请购行')
+        if self.requisition_line_id and self.line.material_id != self.requisition_line.material_id:
+            raise ValidationError('来源请购物料与采购物料不一致')
+        old = type(self).objects.select_for_update().filter(pk=self.pk).first() if self.pk else None
+        ids = sorted({a.requisition_line_id for a in (old, self) if a and a.kind == "1" and a.requisition_line_id})
+        list(PurchaseRequisitionLine.objects.select_for_update().filter(pk__in=ids).order_by('pk'))
+        deltas = {}
+        for a, sign in ((old, -1), (self, 1)):
+            if a and a.kind == '1' and a.requisition_line_id:
+                deltas[a.requisition_line_id] = deltas.get(a.requisition_line_id, Decimal(0)) + sign * a.inventory_quantity
+        for key, delta in deltas.items():
+            if delta: update_applied(key, delta)
+        super().save(*args, **kwargs)
+
+
+@receiver(pre_delete, sender=PurchaseOrderAllocation)
+def release_purchase_allocation(sender, instance, **kwargs):
+    if instance.kind == '1' and instance.requisition_line_id:
+        from backend.requisitions import update_applied
+        update_applied(instance.requisition_line_id, -instance.inventory_quantity)
+
+
+class PurchaseGeneration(models.Model):
+    key = models.CharField(max_length=80, unique=True)
+    actor = models.CharField(max_length=150)
+    request_hash = models.CharField(max_length=64)
+    order_ids = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)

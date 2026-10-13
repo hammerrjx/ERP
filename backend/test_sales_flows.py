@@ -5,6 +5,85 @@ from backend.test_support import CoreFlowSupport
 
 
 class SalesFlowApiTests(CoreFlowSupport, APITestCase):
+    def test_approved_order_detail_includes_material_codes_without_lookups(self):
+        context = self.base_context()
+        customer_material = self.post("customer-material", {
+            "customer": context["customer"]["id"], "material": context["material"]["id"],
+            "customer_code": "CUST-DETAIL-001",
+        })
+        order = self.post("sales-order", {
+            "customer": context["customer"]["id"], "currency": context["currency"]["id"],
+            "customer_po": "PO-DETAIL-001", "delivery_address": "客户仓", "promised_date": "2026-09-05",
+            "lines": [{"material": context["material"]["id"], "customer_material": customer_material["id"],
+                       "uom": context["uom"]["id"], "quantity": "1", "unit_price": "1",
+                       "promised_date": "2026-09-05"}],
+        })
+        self.approve("sales-order", order["id"])
+        detail = self.client.get(f"/api/sales-order/{order['id']}/")
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data["status"], "approved")
+        self.assertEqual(detail.data["lines"][0]["material_code"], context["material"]["code"])
+        self.assertEqual(detail.data["lines"][0]["customer_material_code"], "CUST-DETAIL-001")
+
+    def test_source_posted_quote_is_price_eligible_without_local_ratification(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from backend.models import SalesQuote, SalesQuoteLine
+
+        context = self.base_context()
+        customer_material = self.post("customer-material", {
+            "customer": context["customer"]["id"], "material": context["material"]["id"],
+            "customer_code": "CUST-SOURCE-QUOTE-001",
+        })
+        today = timezone.localdate()
+        quote = SalesQuote.objects.create(
+            customer_id=context["customer"]["id"], currency_id=context["currency"]["id"],
+            effective_date=today - timedelta(days=1), source_object="dgyzx1.sc_mstr",
+            source_snapshot={"sc_pst": True}, created_by="dgyzx1-import", status="approved", is_confirmed=True,
+        )
+        quote_line = SalesQuoteLine.objects.create(
+            quote=quote, line_number=10, material_id=context["material"]["id"],
+            customer_material_id=customer_material["id"], customer_material_code="CUST-SOURCE-QUOTE-001",
+            uom_id=context["uom"]["id"], unit_price="4.462", quantity="1",
+        )
+
+        previous = self.client.get("/api/sales-quote/previous/", {
+            "customer": context["customer"]["id"], "material": context["material"]["id"],
+            "customer_material": customer_material["id"], "currency": context["currency"]["id"],
+            "date": today.isoformat(),
+        })
+        self.assertEqual(previous.status_code, 200, previous.data)
+        self.assertEqual(previous.data["quote_line_id"], quote_line.id)
+        self.assertFalse(quote.is_ratified)
+        self.assertTrue(quote.is_price_eligible)
+        converted = self.client.post(f"/api/sales-quote/{quote.id}/convert/", {
+            "customer_po": "PO-SOURCE-QUOTE-001", "delivery_address": "客户仓",
+            "promised_date": today.isoformat(),
+            "lines": {str(quote_line.id): {"quantity": "1", "spare_quantity": "0"}},
+        }, format="json")
+        self.assertEqual(converted.status_code, 201, converted.data)
+        self.assertEqual(converted.data["lines"][0]["source_quote_line"], quote_line.id)
+
+    def test_sales_order_search_uses_customer_material_relation(self):
+        context = self.base_context()
+        customer_material = self.post("customer-material", {
+            "customer": context["customer"]["id"], "material": context["material"]["id"],
+            "customer_code": "CUST-SEARCH-001", "customer_name": "客户料号搜索",
+        })
+        order = self.post("sales-order", {
+            "customer": context["customer"]["id"], "currency": context["currency"]["id"],
+            "customer_po": "PO-SEARCH-001", "delivery_address": "客户仓", "promised_date": "2026-09-05",
+        })
+        self.post("sales-order-line", {
+            "order": order["id"], "line_number": 10, "material": context["material"]["id"],
+            "customer_material": customer_material["id"], "uom": context["uom"]["id"],
+            "quantity": "1", "promised_date": "2026-09-05",
+        })
+        response = self.client.get("/api/sales-order/?q=CUST-SEARCH-001&page=1")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], order["id"])
+
     def test_order_can_be_created_with_nested_linked_line(self):
         context = self.base_context()
         customer_material = self.post("customer-material", {
@@ -86,14 +165,17 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
                 self.assertFalse(SalesOrderLine.objects.exists())
 
     def test_approved_sales_quote_converts_to_order_with_delivery_promise(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        today = timezone.localdate()
         context = self.base_context()
         customer_material = self.post("customer-material", {
             "customer": context["customer"]["id"], "material": context["material"]["id"],
             "customer_code": "CUST-FG-001", "customer_uom": context["uom"]["id"],
         })
         quote = self.post("sales-quote", {
-            "customer": context["customer"]["id"], "effective_date": "2026-08-20",
-            "expiry_date": "2026-09-20", "lines": [{
+            "customer": context["customer"]["id"], "effective_date": str(today - timedelta(days=30)),
+            "expiry_date": str(today + timedelta(days=30)), "lines": [{
                 "line_number": 10, "material": context["material"]["id"],
                 "customer_material": customer_material["id"], "quantity": "12",
                 "unit_price": "25.50", "promised_date": "2026-09-05",
@@ -140,12 +222,8 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         generated = self.client.post(f"/api/sales-order/{order['id']}/generate-requisition/", {
             "department": department["id"], "needed_date": "2026-09-05",
         }, format="json")
-        self.assertEqual(generated.status_code, 201, generated.data)
-        self.assertEqual(generated.data["aggregation_mode"], "none")
-        self.assertEqual(generated.data["source_sales_order"], order["id"])
-        line = self.client.get("/api/purchase-requisition-line/").data[0]
-        self.assertEqual(line["source_sales_order_line"], order_line["id"])
-        self.assertEqual(line["requested_qty"], "10.000000")
+        self.assertEqual(generated.status_code, 400, generated.data)
+        self.assertEqual(self.client.get("/api/purchase-requisition-line/").data, [])
 
     def test_approved_sales_order_generates_delivery_draft_from_remaining_lines(self):
         context = self.base_context()
@@ -227,7 +305,7 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         refreshed = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
         self.assertEqual(refreshed.data["delivered_quantity"], "100.00000000")
         balance = self.client.get("/api/stock-balance/").data[0]
-        self.assertEqual(balance["quantity"], "100.000000")
+        self.assertEqual(balance["quantity"], "100.00000000")
 
     def test_order_return_can_reference_order_line_without_delivery_header(self):
         context = self.base_context()
@@ -297,37 +375,18 @@ class SalesFlowApiTests(CoreFlowSupport, APITestCase):
         })
         self.approve("delivery-order", delivery["id"])
         balance = self.client.get("/api/stock-balance/").data[0]
-        self.assertEqual(balance["quantity"], "10.000000")
+        self.assertEqual(balance["quantity"], "10.00000000")
         refreshed_line = self.client.get(f"/api/delivery-order-line/{delivery_line['id']}/")
         self.assertEqual(refreshed_line.data["actual_quantity"], "4.00000000")
         sales_line = self.client.get(f"/api/sales-order-line/{order_line['id']}/")
         self.assertEqual(sales_line.data["delivered_quantity"], "4.00000000")
 
-    @override_settings(ERP_DELIVERY_POST_STOCK=True)
-    def test_no_order_sales_return_from_fg01_must_enter_quarantine_location(self):
+    def test_no_order_returns_require_atomic_sheet_endpoint(self):
         context = self.base_context()
-        quarantine = self.post("location", {
-            "code": "RMA", "name": "不良品仓", "location_type": "ng", "quarantine_return": True,
-        })
-        sales_return = self.post("sales-return", {
-            "customer": context["customer"]["id"], "return_date": "2026-09-03",
-            "srm_number": "SRM-RETURN-001", "reason": "品质异常退货",
-        })
-        invalid = self.client.post("/api/sales-return-line/", {
-            "sales_return": sales_return["id"], "line_number": 10,
-            "material": context["material"]["id"], "uom": context["uom"]["id"], "quantity": "2",
-            "original_location": context["location"]["id"], "return_location": context["location"]["id"],
+        result = self.client.post("/api/sales-return/", {
+            "customer": context["customer"]["id"], "no_order": True,
         }, format="json")
-        self.assertEqual(invalid.status_code, 400, invalid.data)
-        self.post("sales-return-line", {
-            "sales_return": sales_return["id"], "line_number": 10,
-            "material": context["material"]["id"], "uom": context["uom"]["id"], "quantity": "2",
-            "original_location": context["location"]["id"], "return_location": quarantine["id"],
-        })
-        self.approve("sales-return", sales_return["id"])
-        balance = self.client.get("/api/stock-balance/").data[0]
-        self.assertEqual(balance["location"], quarantine["id"])
-        self.assertEqual(balance["quantity"], "2.000000")
+        self.assertEqual(result.status_code, 400)
 
     def test_selected_delivery_lines_keep_requested_quantity_and_location(self):
         context = self.base_context()

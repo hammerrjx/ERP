@@ -24,9 +24,11 @@ class Command(BaseCommand):
                     SELECT usr_user AS code, usr_name AS name, usr_group AS group_code,
                            usr_dept AS department_code, usr_def_site AS default_site,
                            usr_employee AS is_employee, usr_lock AS is_locked, usr_out AS is_left,
+                           usr_agent AS agent_code, usr_allow_ip AS allowed_ip,
                            usr_tele AS phone, usr_mobile AS mobile, usr_email AS email,
                            usr_qq AS qq, usr_wechat AS wechat, usr_pos AS position,
-                           usr_lang AS language, usr_company AS company
+                           usr_other AS other_contact, usr_lang AS language, usr_type AS user_type,
+                           usr_company AS company, usr_cm_vd AS partner_code
                     FROM dbo.usr_mstr
                 """)
                 names = [column[0] for column in result.description]
@@ -55,10 +57,13 @@ class Command(BaseCommand):
                 "is_employee": bool(row.get("is_employee")),
                 "is_locked": bool(row.get("is_locked")),
                 "is_left": bool(row.get("is_left")),
+                "agent_code": self.clean(row.get("agent_code")), "allowed_ip": self.clean(row.get("allowed_ip")),
                 "phone": self.clean(row.get("phone")), "mobile": self.clean(row.get("mobile")),
                 "email": self.clean(row.get("email")), "qq": self.clean(row.get("qq")),
                 "wechat": self.clean(row.get("wechat")), "position": self.clean(row.get("position")),
-                "language": self.clean(row.get("language")), "company": self.clean(row.get("company")),
+                "other_contact": self.clean(row.get("other_contact")), "language": self.clean(row.get("language")),
+                "user_type": self.clean(row.get("user_type")), "company": self.clean(row.get("company")),
+                "partner_code": self.clean(row.get("partner_code")),
                 "status": ApprovalStatus.APPROVED, "approved_by": "dgyzx1-import",
                 "approved_at": timezone.now(), "source_object": "usr_mstr",
             }

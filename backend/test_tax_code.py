@@ -64,3 +64,10 @@ class TaxCodeImportTests(SourceDatabaseIsolatedMixin, TestCase):
     def test_empty_source_prefix_does_not_use_stale_local_serial(self):
         with patch("backend.material_codes._source_codes", return_value=[]):
             self.assertEqual(allocate_material_code("NEW", ["NEW-0099"]), "NEW-0001")
+
+    def test_empty_source_prefix_advances_new_local_contiguous_run(self):
+        with patch("backend.material_codes._source_codes", return_value=[]):
+            first = allocate_material_code("NEW", ["NEW-0099"])
+            second = allocate_material_code("NEW", ["NEW-0099", first])
+            self.assertEqual(second, "NEW-0002")
+            self.assertEqual(allocate_material_code("NEW", [first, second]), "NEW-0003")

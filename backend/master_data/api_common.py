@@ -53,6 +53,7 @@ def ensure_status_unchanged(serializer):
 
 class ErpRolePermission(permissions.BasePermission):
     parent_resources = {
+        "currency_rate": "currency",
         "bom_line": "bom", "routing_operation": "routing",
         "sales_quote_line": "sales_quote", "sales_order_line": "sales_order",
         "supplier_quote_line": "supplier_quote",
@@ -64,6 +65,8 @@ class ErpRolePermission(permissions.BasePermission):
         "purchase_return_line": "purchase_return", "sales_return_line": "sales_return",
     }
     action_permissions = {
+        "purchase_preview": "view", "purchase_generate": "view", "convert_purchase": "view",
+        "delivery_unapprove": "approve",
         "list": "view", "retrieve": "view", "create": "create",
         "update": "change", "partial_update": "change", "destroy": "delete",
         "submit": "submit", "approve": "approve", "reject": "approve",
@@ -76,7 +79,9 @@ class ErpRolePermission(permissions.BasePermission):
         "reserve_number": "create", "save_sheet": "create", "update_sheet": "change", "order_candidates": "view",
         "delivery_approve": "approve", "delivery_unapprove": "approve",
         "po_change_confirm": "approve", "po_change_unconfirm": "approve", "print": "view",
-        "export": "view",
+        "export": "view", "search_export": "view",
+        "close_line": "approve",
+        "sign": "approve", "unsign": "approve", "candidates": "view",
     }
 
     def has_permission(self, request, view):
@@ -86,6 +91,8 @@ class ErpRolePermission(permissions.BasePermission):
         if user.is_superuser:
             return True
         action = self.action_permissions.get(getattr(view, "action", ""), "view")
+        if getattr(view, "basename", "") == "inventory-document" and getattr(view, "action", "") == "transition":
+            action = "approve"
         resource = getattr(view, "basename", "").replace("-", "_")
         resource = self.parent_resources.get(resource, resource)
         if resource == "sales_quote" and getattr(view, "action", "") in {"confirm", "unconfirm"}:
@@ -122,16 +129,24 @@ class ApprovalViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def transition(self, obj, action, actor="", reason=""):
-        if obj._meta.model_name in {"deliveryorder", "salesreturn", "salesorder"}:
+        if obj._meta.model_name in {"deliveryorder", "salesreturn", "salesorder", "stocktransfer", "stockcount", "goodsreceipt", "purchasereturn"}:
             obj = type(obj).objects.select_for_update().get(pk=obj.pk)
+        if obj._meta.model_name in {"stocktransfer", "stockcount", "goodsreceipt", "purchasereturn"} and obj.posted:
+            if action == "approve":
+                return response.Response(self.get_serializer(obj).data)
+            if action not in {"confirm", "unconfirm"}:
+                raise serializers.ValidationError("已过账单据不得改写库存，请使用关联退货或冲销")
         if obj._meta.model_name in {"deliveryorder", "salesreturn"} and obj.posted:
             if action == "approve" and obj.status == ApprovalStatus.APPROVED:
                 return response.Response(self.get_serializer(obj).data)
-            if action not in {"confirm", "unconfirm"}:
+            if action not in {"confirm", "unconfirm"} and not (action == 'unapprove' and
+                    obj._meta.model_name == 'deliveryorder' and getattr(obj, 'posting_version', 0)):
                 raise serializers.ValidationError("已生效单据只能登记回单或通过退货、红冲纠正")
         try:
             if action == "approve":
                 obj.approve(actor)
+            elif action == 'unapprove' and obj._meta.model_name == 'deliveryorder':
+                obj.unapprove(actor)
             elif action == "reject":
                 obj.reject(actor, reason)
             elif action == "confirm":
@@ -190,7 +205,7 @@ class ApprovalViewSet(viewsets.ModelViewSet):
 
     @decorators.action(detail=True, methods=["post"])
     def unapprove(self, request, pk=None):
-        return self.transition(self.get_object(), "unapprove")
+        return self.transition(self.get_object(), "unapprove", request.user.get_username())
 
     @decorators.action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):

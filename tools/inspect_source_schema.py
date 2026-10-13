@@ -2,6 +2,8 @@
 
 from collections import defaultdict
 from pathlib import Path
+import argparse
+import json
 import os
 
 import pyodbc
@@ -10,17 +12,56 @@ import pyodbc
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env"
 OUTPUT_FILE = ROOT / "docs" / "source-schema-catalog.md"
+PROFILE_FILE = ROOT / "tools" / "source_databases.json"
 
 
-def load_dotenv(path):
+def read_dotenv(path):
+    values = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
-def connection_string():
+def load_dotenv(path):
+    for key, value in read_dotenv(path).items():
+        os.environ.setdefault(key, value)
+
+
+def profiles():
+    return json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+
+
+def odbc_value(value):
+    return "{" + str(value).replace("}", "}}") + "}"
+
+
+def profile_connection_string(profile):
+    configured = profiles()
+    if profile not in configured:
+        raise ValueError(f"Unknown source profile: {profile}. Choose: {', '.join(configured)}")
+    config = configured[profile]
+    parts = {"DRIVER": config["driver"], "SERVER": config["server"], "DATABASE": config["database"]}
+    if config["authentication"] == "windows":
+        parts["Trusted_Connection"] = "yes"
+    elif config["authentication"] == "sql":
+        credentials = read_dotenv(ROOT / config["credentials_file"])
+        for attribute, key in (("UID", "ERP_SOURCE_DB_USER"), ("PWD", "ERP_SOURCE_DB_PASSWORD")):
+            if not credentials.get(key):
+                raise ValueError(f"Missing {key} in {config['credentials_file']}")
+            parts[attribute] = credentials[key]
+    else:
+        raise ValueError(f"Unsupported authentication for {profile}")
+    return "".join(f"{key}={odbc_value(value)};" for key, value in parts.items()) + (
+        "APP=ERP-SchemaInspector;Connection Timeout=10;"
+    )
+
+
+def connection_string(profile=None):
+    if profile is not None:
+        return profile_connection_string(profile)
     required = ["ERP_SOURCE_DB_HOST", "ERP_SOURCE_DB_PORT", "ERP_SOURCE_DB_NAME", "ERP_SOURCE_DB_USER", "ERP_SOURCE_DB_PASSWORD"]
     missing = [name for name in required if not os.getenv(name)]
     if missing:
@@ -70,16 +111,17 @@ def is_candidate(name, columns):
     return any(keyword in text for keyword in keywords)
 
 
-def render_catalog(objects, columns, foreign_keys):
+def render_catalog(objects, columns, foreign_keys, profile=None):
     grouped = defaultdict(list)
     for column in columns:
         grouped[(column[0], column[1])].append(column)
-    candidates = [(schema, name, kind) for schema, name, kind in objects if is_candidate(name, [column[2] for column in grouped[(schema, name)]])]
+    candidates = list(objects) if profile else [(schema, name, kind) for schema, name, kind in objects if is_candidate(name, [column[2] for column in grouped[(schema, name)]])]
     lines = [
         "# 原 ERP 数据库结构目录",
         "",
         "此文件由 `tools/inspect_source_schema.py` 从系统元数据生成；未读取业务记录。",
         "",
+        f"- 数据源：{profile or 'legacy .env'}",
         f"- 对象总数：{len(objects)}",
         f"- 候选对象：{len(candidates)}",
         f"- 外键约束：{len(foreign_keys)}",
@@ -104,11 +146,35 @@ def render_catalog(objects, columns, foreign_keys):
 
 
 def main():
-    load_dotenv(ENV_FILE)
-    with pyodbc.connect(connection_string(), readonly=True) as connection:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", choices=profiles(), help="Named source; omitted uses legacy .env")
+    parser.add_argument("--list", action="store_true", help="List configured sources without connecting")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--check", action="store_true", help="Check connection and count visible tables/views")
+    action.add_argument("--find", help="Find tables, views or columns by substring")
+    args = parser.parse_args()
+    if args.list:
+        for name, config in profiles().items():
+            print(f"{name}: {config['server']} / {config['database']} ({config['authentication']})")
+        return
+    if not args.profile:
+        load_dotenv(ENV_FILE)
+    with pyodbc.connect(connection_string(args.profile), readonly=True, timeout=10) as connection:
+        connection.timeout = 30
+        if args.check:
+            print(connection.execute("SELECT DB_NAME(), (SELECT COUNT(*) FROM sys.tables), (SELECT COUNT(*) FROM sys.views)").fetchone())
+            return
         objects, columns, foreign_keys = fetch_metadata(connection)
-    OUTPUT_FILE.write_text(render_catalog(objects, columns, foreign_keys), encoding="utf-8")
-    print(f"已写入 {OUTPUT_FILE}")
+    if args.find:
+        needle = args.find.casefold()
+        for column in columns:
+            if needle in ".".join(column[:3]).casefold():
+                print(f"{column[0]}.{column[1]}.{column[2]}: {column[3]}")
+        return
+    output = ROOT / "outputs" / "source-schemas" / f"{args.profile}.md" if args.profile else OUTPUT_FILE
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render_catalog(objects, columns, foreign_keys, args.profile), encoding="utf-8")
+    print(f"已写入 {output}")
     print(f"发现 {len(objects)} 个对象、{len(foreign_keys)} 条外键关系。")
 
 

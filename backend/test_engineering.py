@@ -10,10 +10,12 @@ class EngineeringApiTests(ApiSupport, APITestCase):
         location = self.post("location", {"code": "RM01", "name": "原料仓"})
         category = self.post("product-category", {"code": "RM", "name": "原材料"})
         parent = self.post("material", {
+            "specification": "回归测试规格",
             "code": "FG-001", "name": "成品", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "1001",
         })
         component = self.post("material", {
+            "specification": "回归测试规格",
             "code": "RM-001", "name": "组件", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "1002",
         }) if with_component else None

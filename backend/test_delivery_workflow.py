@@ -6,6 +6,20 @@ from backend.test_support import CoreFlowSupport
 
 
 class DeliveryWorkflowTests(CoreFlowSupport, APITestCase):
+    def test_delivery_list_supports_bounded_pages_without_detail_prefetch(self):
+        from backend.master_data.delivery_views import DeliveryOrderViewSet
+        from rest_framework.test import APIRequestFactory
+
+        view = DeliveryOrderViewSet()
+        view.action = "list"
+        view.request = APIRequestFactory().get("/api/delivery-order/?page=1")
+        view.request.query_params = view.request.GET
+        self.assertFalse(view.get_queryset()._prefetch_related_lookups)
+        result = self.client.get("/api/delivery-order/?page=1&page_size=50")
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertIn("count", result.data)
+        self.assertLessEqual(len(result.data["results"]), 50)
+
     def setUp(self):
         super().setUp()
         self.context = self.base_context()
@@ -47,6 +61,22 @@ class DeliveryWorkflowTests(CoreFlowSupport, APITestCase):
         self.assertEqual(DeliveryOrder.objects.count(), 0)
         self.assertRegex(first["number"], r"^MYSD2609\d{4}$")
         self.assertNotEqual(self.reserve()["number"], first["number"])
+
+    def test_changed_month_requires_new_reservation(self):
+        payload = self.payload()
+        payload['delivery_date'] = '2026-10-01'
+        self.save(payload, status=400)
+        response = self.client.post('/api/delivery-order/reserve-number/', {
+            'request_id': payload['reservation'], 'delivery_date': '2026-10-01',
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post('/api/delivery-order/reserve-number/', {
+            'request_id': str(uuid.uuid4()), 'delivery_date': '2026-10-01',
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['number'].startswith('MYSD2610'))
+        saved = self.save({**payload, **response.data})
+        self.assertEqual(saved['delivery_date'], '2026-10-01')
 
     def test_mixed_950_and_50_fulfilment_and_replacement(self):
         from decimal import Decimal
@@ -129,6 +159,25 @@ class DeliveryWorkflowTests(CoreFlowSupport, APITestCase):
         self.assertTrue(DeliveryNumberReservation.objects.filter(delivery_id=saved["id"]).exists())
         candidates = self.client.get("/api/delivery-order/order-candidates/", {"customer": self.context["customer"]["id"]})
         self.assertEqual(float(candidates.data["results"][0]["available_quantity"]), 100)
+
+    def test_pending_delivery_can_correct_location_or_void_to_release_capacity(self):
+        saved = self.save(self.payload("100"))
+        submitted = self.client.post(f"/api/delivery-order/{saved['id']}/submit/")
+        self.assertEqual(submitted.status_code, 200, submitted.data)
+        from backend.models import Location
+        corrected = Location.objects.create(code="FG18", name="正确库位", location_type="fg")
+        detail = self.client.get(f"/api/delivery-order/{saved['id']}/").data
+        detail['lines'][0]['source_location'] = corrected.pk
+        edited = self.client.post(f"/api/delivery-order/{saved['id']}/save-sheet/", detail, format="json")
+        self.assertEqual(edited.status_code, 200, edited.data)
+        self.assertEqual(edited.data['status'], 'pending')
+        self.assertEqual(edited.data['lines'][0]['source_location'], corrected.pk)
+        self.assertFalse(DeliveryOrder.objects.get(pk=saved['id']).posted)
+        response = self.client.post(f"/api/delivery-order/{saved['id']}/void/")
+        self.assertEqual(response.status_code, 200, response.data)
+        candidates = self.client.get('/api/delivery-order/order-candidates/', {'customer':self.context['customer']['id']})
+        self.assertEqual(float(candidates.data['results'][0]['available_quantity']), 100)
+        self.assertTrue(DeliveryNumberReservation.objects.filter(delivery_id=saved['id']).exists())
 
     def test_save_defaults_notes_address_and_duplicate_request(self):
         payload = self.payload()
@@ -268,6 +317,21 @@ class DeliveryWorkflowTests(CoreFlowSupport, APITestCase):
         self.approve("delivery-order", returned["id"])
         self.assertFalse(StockBalance.objects.exists())
         self.assertFalse(StockTransaction.objects.exists())
+
+    def test_signed_delivery_uses_260_for_both_directions(self):
+        from decimal import Decimal
+        from backend.models import Location, StockBalance, StockTransaction
+        with self.settings(ERP_DELIVERY_POST_STOCK=True):
+            StockBalance.objects.create(material_id=self.context['material']['id'], location_id=self.context['location']['id'], uom_id=self.context['uom']['id'], quantity=10)
+            sent = self.save(self.payload('10'))
+            self.approve('delivery-order', sent['id'])
+            self.assertEqual(StockTransaction.objects.get().movement_type, '260')
+            self.assertEqual(StockBalance.objects.get().quantity, Decimal('0'))
+            returned = self.save(self.payload('-4'))
+            self.approve('delivery-order', returned['id'])
+        self.assertEqual(set(StockTransaction.objects.values_list('movement_type', flat=True)), {'260'})
+        self.assertEqual(StockBalance.objects.get().quantity, Decimal('4'))
+        self.assertEqual(SalesOrderLine.objects.get(pk=self.line['id']).delivered_quantity, Decimal('6'))
 
     def test_standalone_detail_change_invalidates_open_sheet(self):
         saved = self.save(self.payload())

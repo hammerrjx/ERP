@@ -54,8 +54,8 @@ class SalesQuoteSequence(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     @classmethod
-    def next_number(cls):
-        period = timezone.localdate().strftime("%Y%m")
+    def next_number(cls, day=None):
+        period = models.DateField().to_python(day or timezone.localdate()).strftime("%Y%m")
         with transaction.atomic():
             sequence, _ = cls.objects.select_for_update().get_or_create(period=period)
             existing = SalesQuote.objects.filter(number__startswith=f"MYSQ{period[2:]}").values_list(
@@ -65,6 +65,8 @@ class SalesQuoteSequence(models.Model):
                 [sequence.last_value, *(int(number[-4:]) for number in existing if str(number)[-4:].isdigit())]
             )
             sequence.last_value += 1
+            if sequence.last_value > 9999:
+                raise ValidationError('本月四位报价流水已用尽')
             sequence.save(update_fields=("last_value", "updated_at"))
         return f"MYSQ{period[2:]}{sequence.last_value:04d}"
 
@@ -86,6 +88,8 @@ class SalesOrderSequence(models.Model):
                 [sequence.last_value, *(int(number[-4:]) for number in existing if str(number)[-4:].isdigit())]
             )
             sequence.last_value += 1
+            if sequence.last_value > 9999:
+                raise ValidationError('本月四位订单流水已用尽')
             sequence.save(update_fields=("last_value", "updated_at"))
         return f"MYSO{period[2:]}{sequence.last_value:04d}"
 
@@ -119,6 +123,14 @@ class SalesQuote(AuditedModel):
     ratified_by = models.CharField(max_length=64, blank=True)
     ratified_at = models.DateTimeField(null=True, blank=True)
     source_object = models.CharField(max_length=40, default="sc_mstr")
+    source_snapshot = models.JSONField(default=dict, blank=True, editable=False)
+
+    @property
+    def is_price_eligible(self):
+        if self.source_object == "dgyzx1.sc_mstr":
+            return (self.source_snapshot.get("sc_pst") is True and self.is_confirmed
+                    and self.status in {ApprovalStatus.PENDING, ApprovalStatus.APPROVED})
+        return self.is_ratified and self.status == ApprovalStatus.APPROVED
 
     class Meta:
         ordering = ("-effective_date", "-number")
@@ -133,7 +145,7 @@ class SalesQuote(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = SalesQuoteSequence.next_number()
+            self.number = SalesQuoteSequence.next_number(self.effective_date)
         if self.address_code_id:
             self.address_snapshot = self.address_code.address
             self.address = self.address_snapshot
@@ -293,6 +305,7 @@ class SalesOrder(AuditedModel):
         SUPPLIER = "supplier", "供应商代送"
 
     number = models.CharField(max_length=40, unique=True, blank=True)
+    site = models.CharField(max_length=16, default="1000")
     customer = models.ForeignKey("Partner", on_delete=models.PROTECT, related_name="sales_orders")
     order_type = models.CharField(max_length=1, choices=OrderType.choices, default=OrderType.FORMAL)
     sales_person = models.ForeignKey(
@@ -364,7 +377,11 @@ class SalesOrder(AuditedModel):
 
     def save(self, *args, **kwargs):
         if not self.number:
-            self.number = SalesOrderSequence.next_number(self.order_date)
+            if self.order_type == '2':
+                from .document_numbers import next_document_number
+                self.number = next_document_number('MYYP', self.order_date, 'SalesOrder')
+            else:
+                self.number = SalesOrderSequence.next_number(self.order_date)
         super().save(*args, **kwargs)
 
 
@@ -478,6 +495,10 @@ class SalesOrderLine(models.Model):
                 raise ValidationError("正式数量与备品计划不能同时为零")
             if self.quantity < self.delivered_quantity or self.spare_quantity < self.delivered_spare_quantity:
                 raise ValidationError("订单计划不能小于当前净已送数量")
+        if self.pk:
+            previous = type(self).objects.get(pk=self.pk)
+            if previous.line_number != self.line_number or previous.order_id != self.order_id:
+                raise ValidationError("订单行号和所属订单不能修改")
         if self.customer_material_id and (
             self.customer_material.customer_id != self.order.customer_id
             or self.customer_material.material_id != self.material_id
@@ -487,8 +508,8 @@ class SalesOrderLine(models.Model):
         if self.source_quote_line_id:
             quote_line = self.source_quote_line
             quote = quote_line.quote
-            if not quote.is_ratified:
-                raise ValidationError({"source_quote_line": "来源销售报价未核准"})
+            if not quote.is_price_eligible:
+                raise ValidationError({"source_quote_line": "来源销售报价未发布或未核准"})
             if quote.effective_date > self.order.order_date or (
                 quote.expiry_date and quote.expiry_date < self.order.order_date
             ):
@@ -552,6 +573,7 @@ class SalesOrderLine(models.Model):
             conversion = material.uom_conversions.filter(usage=MaterialUomConversion.Usage.SALES).first()
             if conversion:
                 self.uom = conversion.business_uom
+                # Source imports store pt_um_sl_m/d in these legacy field names.
                 self.uom_rate_m = conversion.business_qty
                 self.uom_rate_d = conversion.stock_qty
         previous_quote_id = (

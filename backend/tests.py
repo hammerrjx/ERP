@@ -26,6 +26,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
         })
         company = self.post("company", {"code": "C001", "name": "合越制造"})
         material = self.post("material", {
+            "specification": "回归测试规格",
             "name": "注塑外壳", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "3926909090",
         })
@@ -80,6 +81,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
             "code": "SUP001", "name": "原料供应商", "short_name": "原料供", "kind": "supplier", "payment_method": "供应商月结", "currency": currency["id"],
         })
         material = self.post("material", {
+            "specification": "回归测试规格",
             "name": "聚乙烯颗粒", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "3901200090",
         })
@@ -116,6 +118,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
             "payment_method": "月结", "currency": currency["id"],
         })
         material = self.post("material", {
+            "specification": "回归测试规格",
             "name": "业务组物料", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "BG-TAX",
         })
@@ -143,6 +146,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
             "payment_method": "月结", "currency": currency["id"], "tax_rate": "13",
         })
         material = self.post("material", {
+            "specification": "回归测试规格",
             "name": "报价物料", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "SQ-TAX", "min_purchase_qty": "5", "min_pack_qty": "10",
         })
@@ -180,20 +184,23 @@ class MasterDataApiTests(ApiSupport, APITestCase):
         self.assertEqual(sum(1 for _ in workbook["报价阶梯明细"].iter_rows()), 3)
 
     def test_partner_customer_supplier_alignment_fields_are_persisted(self):
+        self.post('currency', {'code': 'RMB', 'name': '人民币'})
         customer = self.post("partner", {
             "code": "CUS001", "name": "客户公司", "short_name": "客户", "kind": "customer",
-            "payment_method": "月结", "notes": "客户备注", "copper_origin": "华东", "copper_currency": "CNY",
+            "payment_method": "月结", "notes": "客户备注", "copper_origin": "华东", "copper_currency": "RMB",
             "round_order_quantity_for_tier_price": True,
         })
         self.assertEqual(customer["notes"], "客户备注")
         self.assertEqual(customer["copper_origin"], "华东")
         self.assertTrue(customer["round_order_quantity_for_tier_price"])
 
+        from backend.models import Employee
+        Employee.objects.create(code='BUY01', name='采购员')
         supplier = self.post("partner", {
             "code": "SUP003", "name": "供应商公司", "short_name": "供应商", "kind": "supplier",
-            "payment_method": "供应商月结", "buyer": "采购员", "notes": "供应商备注", "internal_company": True,
+            "payment_method": "供应商月结", "buyer": "BUY01", "notes": "供应商备注", "internal_company": True,
         })
-        self.assertEqual(supplier["buyer"], "采购员")
+        self.assertEqual(supplier["buyer"], "BUY01")
         self.assertEqual(supplier["notes"], "供应商备注")
         self.assertTrue(supplier["internal_company"])
 
@@ -222,6 +229,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
         customer = self.post("partner", {"code": "CUSMAT", "name": "客户物料客户", "short_name": "客户物料", "kind": "customer"})
         supplier = self.post("partner", {"code": "SUPMAT", "name": "客户物料供应商", "short_name": "物料供应", "kind": "supplier", "payment_method": "月结"})
         materials = [self.post("material", {
+            "specification": "回归测试规格",
             "name": name, "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": f"TAX{index}",
         }) for index, name in enumerate(("本方物料甲", "本方物料乙"), start=1)]
@@ -235,7 +243,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
         created = self.post("customer-material", payload)
         self.assertEqual(created["material_code"], materials[0]["code"])
         self.assertEqual(created["material_name"], "本方物料甲")
-        self.assertEqual(created["material_specification"], "")
+        self.assertEqual(created["material_specification"], materials[0]["specification"])
         self.assertEqual(created["created_by"], self.user.username)
         self.assertTrue(created["created_at"])
 
@@ -355,6 +363,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
             "code": "SUP002", "name": "待审供应商", "short_name": "待审供", "kind": "supplier", "payment_method": "供应商月结",
         })
         material = self.post("material", {
+            "specification": "回归测试规格",
             "name": "包装膜", "category": category["id"], "uom": uom["id"],
             "default_location": location["id"], "tax_code": "3920109090",
         })
@@ -397,7 +406,7 @@ class MasterDataApiTests(ApiSupport, APITestCase):
         expected_modules = {
             "/api/location/": "backend.master_data.api_common",
             "/api/sales-quote/": "backend.master_data.sales_views",
-            "/api/purchase-requisition/": "backend.master_data.purchase_views",
+            "/api/purchase-requisition/": "backend.master_data.purchase_workspace_views",
             "/api/inventory-alert/": "backend.master_data.inventory_views",
         }
         for path, module in expected_modules.items():

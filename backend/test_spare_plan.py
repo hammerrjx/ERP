@@ -114,7 +114,7 @@ class SparePlanTests(CoreFlowSupport, APITestCase):
         self.assertEqual(Decimal(line["tax_included_amount"]), 0)
         original_id = line["id"]
         changed = self.client.patch(f"/api/sales-order/{order['id']}/", {
-            "lines": [{**self.line, "spare_quantity": "50.00000001", "delivered_quantity": "900",
+            "lines": [{**self.line, "id": original_id, "spare_quantity": "50.00000001", "delivered_quantity": "900",
                        "delivered_spare_quantity": "800"}],
         }, format="json")
         self.assertEqual(changed.status_code, 200, changed.data)
@@ -135,7 +135,7 @@ class SparePlanTests(CoreFlowSupport, APITestCase):
         quote = self.quote()
         order = self.post("sales-order", {**self.header, "lines": [self.line]})
         self.assertIsNone(order["lines"][0]["source_quote_line"])
-        formal = {**self.line, "quantity": "950", "source_quote_line": quote["lines"][0]["id"]}
+        formal = {**self.line, "id": order["lines"][0]["id"], "quantity": "950", "source_quote_line": quote["lines"][0]["id"]}
         selected = self.client.patch(f"/api/sales-order/{order['id']}/", {"lines": [formal]}, format="json")
         self.assertEqual(selected.status_code, 200, selected.data)
         self.assertEqual(Decimal(selected.data["lines"][0]["unit_price"]), 20)

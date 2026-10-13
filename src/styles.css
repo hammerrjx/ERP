@@ -209,6 +209,9 @@ nav { min-height: 0; display: flex; flex-direction: column; gap: 3px; overflow-y
 .detail-grid strong { display: block; color: var(--ink); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .empty { padding: 48px; text-align: center; color: #999397; font-size: 12px; }
 .table-foot { height: 50px; display: flex; align-items: center; padding: 0 17px; color: #999397; font-size: 10px; }
+.table-foot { gap: 12px; min-width: 320px; }
+.table-pagination { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.table-pagination span { min-width: 60px; text-align: center; }
 
 .dashboard { padding: 38px 42px 42px; }
 .welcome { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 27px; padding-bottom: 25px; border-bottom: 1px solid var(--line); }
@@ -595,3 +598,6 @@ nav { min-height: 0; display: flex; flex-direction: column; gap: 3px; overflow-y
   .delivery-header-grid { grid-template-columns: 1fr 1fr; }
   .delivery-header-grid .field-wide { grid-column: 1 / -1; }
 }
+
+.table-card td.full-code-cell{max-width:none;overflow:visible;text-overflow:clip}
+.lookup-menu button strong{white-space:normal;overflow-wrap:anywhere;overflow:visible;text-overflow:clip}

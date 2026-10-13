@@ -1,0 +1,30 @@
+.ia-workspace { min-width: 0; letter-spacing: 0; }
+.ia-filters { padding: 12px; background: #f7f7f8; border-bottom: 1px solid #d5d8dc; }
+.ia-fields { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.ia-fields label, .ia-actions, .ia-options, .ia-options label { display: flex; align-items: center; gap: 6px; }
+.ia-fields input { width: 130px; min-width: 0; height: 28px; }
+.ia-fields .ia-range input { width: 132px; }
+.ia-options { flex-wrap: wrap; margin-top: 10px; align-items: stretch; }
+.ia-options select[multiple] { height: 72px; max-width: 100%; }
+.ia-options fieldset { display: flex; flex-wrap: wrap; gap: 8px; border: 1px solid #d5d8dc; padding: 6px 10px; }
+.ia-options input, .ia-actions input[type=checkbox] { width: 14px; height: 14px; }
+.ia-actions { flex-wrap: wrap; margin-top: 10px; }
+.ia-actions button { display: inline-flex; align-items: center; gap: 5px; }
+.ia-grid, .ia-detail-grid { overflow: auto; min-height: 150px; }
+.ia-grid { height: 48vh; }
+.ia-grid table, .ia-detail-grid table { border-collapse: separate; border-spacing: 0; min-width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ia-grid th, .ia-grid td, .ia-detail-grid th, .ia-detail-grid td { border-right: 1px solid #dfe2e5; border-bottom: 1px solid #dfe2e5; padding: 5px 8px; white-space: nowrap; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.ia-grid th, .ia-detail-grid th { position: sticky; top: 0; z-index: 1; background: #eef0f2; text-align: left; }
+.ia-grid th div { display: flex; align-items: center; }
+.ia-grid th button { display: inline-flex; align-items: center; border: 0; background: transparent; color: inherit; padding: 2px 4px; white-space: nowrap; }
+.ia-grid tbody tr:nth-child(even), .ia-detail-grid tbody tr:nth-child(even) { background: #f5f9f6; }
+.ia-grid tbody tr.selected { background: #e7f0fc; }
+.ia-grid .ia-number { text-align: right; }
+.ia-grid .ia-negative { color: #d92030; font-weight: 600; }
+.ia-grid th button.ia-filter-active { color: #005dcc; background: #dcecff; }
+.ia-grid tfoot td, .ia-detail-grid tfoot td { position: sticky; bottom: 0; background: #edf0f3; font-weight: 600; z-index: 1; }
+.ia-detail-grid { max-height: 25vh; }
+.ia-condition { width: 340px; max-width: calc(100vw - 24px); }
+.ia-condition label { display: flex; gap: 10px; align-items: center; padding: 10px 14px; }
+.ia-condition input, .ia-condition select { min-width: 0; flex: 1; width: 150px; }
+@media(max-width: 600px) { .ia-fields { display: grid; grid-template-columns: 1fr; } .ia-fields .ia-range input { width: 0; flex: 1; } .ia-fields label > span:first-child { min-width: 62px; } .ia-grid { height: 45vh; } .ia-options fieldset { width: 100%; } }

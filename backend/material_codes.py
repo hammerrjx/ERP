@@ -104,7 +104,7 @@ def _allocation_state(prefix, local_codes):
             parsed.append((int(suffix), len(suffix)))
     serial = max((item[0] for item in parsed), default=0)
     width = max((item[1] for item in parsed if item[0] == serial), default=4)
-    if source_codes is not None and parsed:
+    if source_codes is not None:
         # Include locally allocated values only when they form a contiguous
         # run immediately after the source maximum.  This prevents stale
         # four/six-digit local values from overriding the legacy maximum,

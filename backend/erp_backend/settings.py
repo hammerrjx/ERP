@@ -41,10 +41,18 @@ TEMPLATES = [{
 }]
 WSGI_APPLICATION = "erp_backend.wsgi.application"
 DATABASES = {"default": {
-    "ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3",
+    "ENGINE": "django.db.backends.sqlite3", "NAME": os.getenv("ERP_SQLITE_PATH", BASE_DIR / "db.sqlite3"),
     "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20},
 }}
-if os.getenv("ERP_DB_NAME"):
+if os.getenv("ERP_DB_ENGINE") == "mssql":
+    DATABASES["default"] = {
+        "ENGINE": "mssql", "NAME": os.environ["ERP_DB_NAME"],
+        "HOST": os.getenv("ERP_DB_HOST", "localhost"),
+        "USER": os.getenv("ERP_DB_USER", ""), "PASSWORD": os.getenv("ERP_DB_PASSWORD", ""),
+        "OPTIONS": {"driver": os.getenv("ERP_DB_DRIVER", "ODBC Driver 18 for SQL Server"),
+                    "extra_params": os.getenv("ERP_DB_EXTRA_PARAMS", "TrustServerCertificate=yes")},
+    }
+elif os.getenv("ERP_DB_NAME"):
     DATABASES["default"] = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": os.environ["ERP_DB_NAME"],
@@ -67,3 +75,9 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.TokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
 }
+
+# Enable only in a complete test ledger until formal inventory cutover is approved.
+ERP_NO_ORDER_RETURN_POST_STOCK = os.getenv("ERP_NO_ORDER_RETURN_POST_STOCK", "0") == "1"
+
+# Enable only after the local trade stock/open-document baseline is accepted.
+ERP_TRADE_MRP_GENERATION_ENABLED = os.getenv("ERP_TRADE_MRP_GENERATION_ENABLED", "0") == "1"

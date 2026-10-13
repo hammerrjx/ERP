@@ -1,0 +1,16 @@
+{
+  "coerp_dgyzx1": {
+    "driver": "SQL Server",
+    "server": "192.168.8.100,14331",
+    "database": "coerp_dgyzx1",
+    "authentication": "sql",
+    "credentials_file": ".env",
+    "catalog": "coerp_base"
+  },
+  "coerp_xgyzx": {
+    "driver": "ODBC Driver 17 for SQL Server",
+    "server": "localhost",
+    "database": "coerp_xgyzx",
+    "authentication": "windows"
+  }
+}

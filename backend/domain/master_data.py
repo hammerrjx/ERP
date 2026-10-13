@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
+from django.utils import timezone
 
 from .base import AuditedModel
 
@@ -31,8 +32,6 @@ class Uom(AuditedModel):
     code = models.CharField(max_length=16, unique=True)
     name = models.CharField(
         max_length=32,
-        unique=True,
-        validators=[RegexValidator(r"^[^A-Za-z]+$", "计量单位必须使用规范中文/本地化名称")],
     )
     description = models.CharField(max_length=160, blank=True)
     category = models.ForeignKey(UomCategory, on_delete=models.PROTECT, related_name="uoms")
@@ -55,6 +54,7 @@ class Currency(AuditedModel):
     name = models.CharField(max_length=40)
     symbol = models.CharField(max_length=8, blank=True)
     decimal_places = models.PositiveSmallIntegerField(default=2)
+    source_object = models.CharField(max_length=40, blank=True, editable=False)
 
     def __str__(self):
         return f"{self.code} {self.name}"
@@ -81,6 +81,8 @@ class CurrencyRate(models.Model):
     rate_to_company = models.DecimalField(
         max_digits=18, decimal_places=8, validators=[MinValueValidator(Decimal("0.00000001"))]
     )
+    end_rate = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    source_object = models.CharField(max_length=40, blank=True, editable=False)
     created_by = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_by = models.CharField(max_length=64, blank=True)
@@ -204,6 +206,18 @@ class Location(AuditedModel):
         return f"{self.code} {self.name}"
 
 
+class AccountingAccount(AuditedModel):
+    code = models.CharField(max_length=15, unique=True)
+    name = models.CharField(max_length=50)
+    parent_code = models.CharField(max_length=15, blank=True)
+    currency = models.ForeignKey(Currency, on_delete=models.PROTECT, null=True, blank=True)
+    active = models.BooleanField(default=True)
+    posting_allowed = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ('code',)
+
+
 class Partner(AuditedModel):
     class PartnerKind(models.TextChoices):
         CUSTOMER = "customer", "客户"
@@ -283,6 +297,7 @@ class Partner(AuditedModel):
     view_permission = models.CharField(max_length=80, blank=True)
     purchase_account = models.CharField(max_length=32, blank=True)
     temporary_payable_account = models.CharField(max_length=32, blank=True)
+    outsource_fee_account = models.CharField(max_length=32, blank=True)
     outsource_material_account = models.CharField(max_length=32, blank=True)
     default_receipt_location = models.ForeignKey(
         Location, on_delete=models.PROTECT, null=True, blank=True, related_name="default_partner_receipts"
@@ -306,6 +321,7 @@ class Partner(AuditedModel):
     three_certificates = models.BooleanField(default=False)
     business_license = models.BooleanField(default=False)
     internal_company = models.BooleanField(default=False)
+    strategic_supplier = models.BooleanField(default=False)
     payment_hold = models.BooleanField(default=False)
     consignment = models.BooleanField(default=False)
     credit_enabled = models.BooleanField(default=True)
@@ -356,11 +372,18 @@ class TaxCode(AuditedModel):
 class PartnerBankAccount(models.Model):
     partner = models.ForeignKey(Partner, on_delete=models.CASCADE, related_name="bank_accounts")
     account_type = models.CharField(max_length=20, default="company")
-    bank_name = models.CharField(max_length=120, blank=True)
-    account_name = models.CharField(max_length=120, blank=True)
-    account_number = models.CharField(max_length=80)
+    line_number = models.PositiveIntegerField(default=10)
+    bank_name = models.CharField(max_length=255, blank=True)
+    account_name = models.CharField(max_length=255, blank=True)
+    account_number = models.CharField(max_length=255)
     bank_code = models.CharField(max_length=32, blank=True)
-    notes = models.CharField(max_length=240, blank=True)
+    notes = models.CharField(max_length=255, blank=True)
+    other_info = models.CharField(max_length=255, blank=True)
+    created_by = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+    modification_count = models.PositiveIntegerField(default=0)
     is_default = models.BooleanField(default=False)
 
 
@@ -414,7 +437,7 @@ class Material(AuditedModel):
         max_digits=18, decimal_places=6, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
     )
     image = models.ImageField(upload_to="materials/", blank=True)
-    default_location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="default_materials")
+    default_location = models.ForeignKey(Location, on_delete=models.PROTECT, null=True, blank=True, related_name="default_materials")
     default_storage_position = models.CharField(max_length=80, blank=True)
     batch_control = models.BooleanField(default=False)
     batch_rule = models.CharField(max_length=80, blank=True)
@@ -472,19 +495,22 @@ class Material(AuditedModel):
     sales_quote_unrestricted = models.BooleanField(default=False)
     issue_qty_unrestricted = models.BooleanField(default=False)
     outsource_surplus_excluded_from_mrp = models.BooleanField(default=False)
+    inspection_required = models.BooleanField(default=False)
     no_stock_movement = models.BooleanField(default=False)
 
     def clean(self):
         if self.tax_master_id:
             self.tax_code = self.tax_master.code
             self.tax_name = self.tax_master.name
-            self.invoice_name = self.tax_master.invoice_name
+            if not self.invoice_name:
+                self.invoice_name = self.tax_master.invoice_name
         elif self.tax_code:
             tax_master = TaxCode.objects.filter(code=self.tax_code, active=True).first()
             if tax_master:
                 self.tax_master = tax_master
                 self.tax_name = tax_master.name
-                self.invoice_name = tax_master.invoice_name
+                if not self.invoice_name:
+                    self.invoice_name = tax_master.invoice_name
             elif TaxCode.objects.exists():
                 raise ValidationError({"tax_code": "税务编码不存在或已停用"})
         if self.uom_id and self.uom.name.isascii():
@@ -496,13 +522,15 @@ class Material(AuditedModel):
         if self.tax_master_id:
             self.tax_code = self.tax_master.code
             self.tax_name = self.tax_master.name
-            self.invoice_name = self.tax_master.invoice_name
+            if not self.invoice_name:
+                self.invoice_name = self.tax_master.invoice_name
         elif self.tax_code:
             tax_master = TaxCode.objects.filter(code=self.tax_code, active=True).first()
             if tax_master:
                 self.tax_master = tax_master
                 self.tax_name = tax_master.name
-                self.invoice_name = tax_master.invoice_name
+                if not self.invoice_name:
+                    self.invoice_name = tax_master.invoice_name
         if not self.code and self.category_id:
             from django.db import transaction
 

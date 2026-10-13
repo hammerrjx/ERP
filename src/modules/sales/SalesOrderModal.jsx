@@ -27,6 +27,8 @@ import { Field, SearchableLookup } from '../../components/Field'
 import { SalesOrderDetailModal } from './SalesOrderDetailModal'
 import { orderLineColumns, orderFieldByKey, orderGroups } from './salesOrderFields'
 import { AsyncForm, PendingButton } from '../../components/PendingControls'
+import { useSalesLookups } from './useSalesLookups'
+import { previewLineNumbers } from './lineNumbers'
 
 export function SalesOrderModal({ token, lookups, record, onClose, onSave, onDelete, onAction, readOnly = false }) {
   if (readOnly) return <SalesOrderDetailModal lookups={lookups} record={record} onClose={onClose} />
@@ -41,6 +43,11 @@ export function SalesOrderModal({ token, lookups, record, onClose, onSave, onDel
       onAction={onAction}
     />
   )
+}
+
+function newLine(promisedDate) {
+  return { material: '', customer_material: '', quantity: '', spare_quantity: 0,
+    promised_date: promisedDate || today(), copper_origin: '', copper_currency: '', copper_price: 0 }
 }
 
 function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, onAction }) {
@@ -59,22 +66,14 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
   })
   const [lines, setLines] = useState(
     record?.lines || [
-      {
-        material: '',
-        customer_material: '',
-        quantity: '',
-        spare_quantity: 0,
-        promised_date: values.promised_date || today(),
-        copper_origin: '',
-        copper_currency: '',
-        copper_price: 0
-      }
+      newLine(values.promised_date)
     ]
   )
   const customers = lookups.customers || []
+  const lineNumbers = previewLineNumbers(lines, record?.lines)
   quoteContext.current = JSON.stringify([values.customer, values.currency, values.order_date])
-  const materials = lookups.materials || []
-  const customerMaterials = lookups.customerMaterials || []
+  const lookup = useSalesLookups(token, values.customer, lines, lookups)
+  const { materials, customerMaterials } = lookup
   const addressOptions = customerAddressesFor(values.customer, lookups.customerAddresses)
   const priceTypes = [
     ['1', '期货价'],
@@ -260,11 +259,10 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
       ...values,
       lines: lines
         .filter((line) => line.material)
-        .map((line, index) => ({
+        .map((line) => ({
           ...line,
           unit_price: line.unit_price === '' || line.unit_price == null ? '0' : line.unit_price,
           price_type: line.price_type || '1',
-          line_number: line.line_number || (index + 1) * 10,
           promised_date: line.promised_date || values.promised_date
         }))
     })
@@ -274,16 +272,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
       current.length > 1
         ? current.slice(0, -1)
         : [
-            {
-              material: '',
-              customer_material: '',
-              quantity: '',
-              spare_quantity: 0,
-              promised_date: values.promised_date || today(),
-              copper_origin: '',
-              copper_currency: '',
-              copper_price: 0
-            }
+            newLine(values.promised_date)
           ]
     )
   const renderOrderField = (key) => {
@@ -339,6 +328,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
             label={label}
             value={line.material}
             options={materials}
+            onSearch={q => lookup.search("materials", q)}
             onChange={(value) => updateLine(index, 'material', value)}
           />
         </td>
@@ -358,6 +348,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
             value={line.customer_material}
             options={options}
             customerMaterial
+            onSearch={q => lookup.search("customerMaterials", q, line.material)}
             onChange={(value) => updateLine(index, 'customer_material', value)}
           />
         </td>
@@ -414,7 +405,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
         <input
           className="line-readonly"
           readOnly
-          value={lineValue(line, key) || (key === 'line_number' ? (index + 1) * 10 : '')}
+          value={key === 'line_number' ? lineNumbers[index] : lineValue(line, key)}
         />
       </td>
     )
@@ -499,16 +490,7 @@ function SalesOrderEditor({ token, lookups, record, onClose, onSave, onDelete, o
               onClick={() =>
                 setLines((current) => [
                   ...current,
-                  {
-                    material: '',
-                    customer_material: '',
-                    quantity: '',
-                    spare_quantity: 0,
-                    promised_date: values.promised_date || today(),
-                    copper_origin: '',
-                    copper_currency: '',
-                    copper_price: 0
-                  }
+                  newLine(values.promised_date)
                 ])
               }
             >

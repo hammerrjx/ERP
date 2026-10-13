@@ -50,6 +50,18 @@ class ApiSupport(SourceDatabaseIsolatedMixin):
         self.client.force_authenticate(self.user)
 
     def post(self, resource, payload):
+        if resource == "stock-balance":
+            # Inventory is read-only over HTTP; seed test stock through the posting entry.
+            from backend.models import Material, Location, Uom
+            from backend.domain.inventory import StockBalance
+            from backend.master_data.serializers.common import serializer_for
+            from uuid import uuid4
+            balance = StockBalance.adjust(material=Material.objects.get(pk=payload["material"]),
+                location=Location.objects.get(pk=payload["location"]), uom=Uom.objects.get(pk=payload["uom"]),
+                quantity=payload["quantity"], batch_number=payload.get("batch_number", ""),
+                movement_type="test_opening", source_model="test.fixture", source_id="1",
+                source_line_id=str(uuid4()), actor="test")
+            return serializer_for(StockBalance)(balance).data
         response = self.client.post(f"/api/{resource}/", payload, format="json")
         self.assertEqual(response.status_code, 201, response.data)
         return response.data
@@ -70,7 +82,7 @@ class CoreFlowSupport(ApiSupport):
         product_category = self.post("product-category", {"code": "FG", "name": "成品"})
         currency = self.post("currency", {"code": "CNY", "name": "人民币", "symbol": "¥"})
         material = self.post("material", {
-            "code": "FG-001", "name": "交付产品", "category": product_category["id"],
+            "code": "FG-001", "name": "交付产品", "specification": "测试规格", "category": product_category["id"],
             "uom": uom["id"], "default_location": location["id"], "tax_code": "1001",
         })
         customer = self.post("partner", {

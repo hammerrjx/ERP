@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Copy, Plus, RotateCcw, Save, Trash2, Wrench, X } from 'lucide-react'
 import { api } from '../../api/client'
 import { today, formatQuantity } from '../../shared/presentation'
+import { previewLineNumbers } from './lineNumbers'
 
 function CodeLookup({ id, label, value, options, onChange, disabled, required }) {
   const selected = options.find((option) => option.id === Number(value))
@@ -144,6 +145,7 @@ export function DeliveryOrderModal({
     ...(record || {})
   })
   const [lines, setLines] = useState(record?.lines || [])
+  const lineNumbers = previewLineNumbers(lines, record?.lines)
   const [toolsOpen, setToolsOpen] = useState(false)
   const [confirmNumber, setConfirmNumber] = useState(false)
   const [generator, setGenerator] = useState(false)
@@ -156,9 +158,12 @@ export function DeliveryOrderModal({
   const locked = readOnly || record?.posted || record?.status === 'approved'
   const update = (key, value) => {
     setLocalError('')
+    const changedMonth = key === 'delivery_date' && value.slice(0, 7) !== values.delivery_date?.slice(0, 7)
+    if (changedMonth && !record?.id) requestId.current = crypto.randomUUID()
     setValues((current) => ({
       ...current,
       [key]: value,
+      ...(changedMonth && !record?.id ? { reservation: undefined, number: '' } : {}),
       ...(key === 'customer' ? { address_code: '0', address_snapshot: '', delivery_address: '' } : {})
     }))
     if (key === 'customer') setLines([])
@@ -198,11 +203,14 @@ export function DeliveryOrderModal({
     event.preventDefault()
     if (busy || locked) return
     if (!lines.length) return setLocalError('请先根据客户订单生成明细')
-    if (!record?.id && !values.reservation) return setLocalError('请先取得正式单号')
     setBusy(true)
     setLocalError('')
     try {
-      await onSave({ ...values, lines })
+      const reserved = !record?.id && !values.reservation
+        ? await api('/delivery-order/reserve-number/', { token, method: 'POST', body: { request_id: requestId.current, delivery_date: values.delivery_date } })
+        : {}
+      setValues(current => ({ ...current, ...reserved }))
+      await onSave({ ...values, ...reserved, lines })
     } catch (e) {
       setLocalError(e.message)
     } finally {
@@ -224,7 +232,8 @@ export function DeliveryOrderModal({
               <span>{values.number || '未取号'}</span>
             </div>
             <div className="order-head-meta">
-              <span className={'status ' + (locked ? 'green' : 'orange')}>{locked ? '已审核' : '草稿'}</span>
+              <span className={'status ' + (locked ? 'green' : 'orange')}>{record?.status === 'pending' ? '待审核' : locked ? '已审核' : record?.status === 'rejected' ? '已驳回' : '草稿'}</span>
+              {locked && <span className={'status ' + (values.stock_posted ? 'green' : 'orange')}>{values.stock_posted ? '库存已记账' : '库存未记账或无需记账'}</span>}
               <button type="button" aria-label="关闭送货单" onClick={close} disabled={busy}>
                 <X size={19} />
               </button>
@@ -418,7 +427,7 @@ export function DeliveryOrderModal({
                     const location = locations.find((row) => row.id === Number(line.source_location))
                     return (
                       <tr key={line.id || index}>
-                        <td>{line.line_number || (index + 1) * 10}</td>
+                        <td>{lineNumbers[index]}</td>
                         <td>{line.order_number}</td>
                         <td>{line.order_line_number}</td>
                         <td>{line.material_code}</td>

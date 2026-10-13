@@ -23,6 +23,6 @@ EmployeeViewSet = make_viewset(Employee, EmployeeSerializer)
 
 
 class UserAccountViewSet(viewsets.ModelViewSet):
-    queryset = get_user_model().objects.all().order_by("username")
+    queryset = get_user_model().objects.select_related("employee_link__employee").order_by("username")
     serializer_class = UserAccountSerializer
     permission_classes = (permissions.IsAdminUser,)
